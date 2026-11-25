@@ -1,0 +1,1336 @@
+"""
+database.py — JARVIS V1 Data Layer
+-----------------------------------
+Handles all SQLite database operations.
+This file defines the schema (tables) and provides helper functions
+so that app.py never has to write raw SQL — it just calls these functions.
+
+The database file (data/jarvis.db) is created automatically on first run.
+"""
+
+import sqlite3
+import os
+from datetime import datetime, date
+
+# Path to the SQLite database file
+DB_PATH = os.path.join(os.path.dirname(__file__), "data", "jarvis.db")
+
+
+def get_connection():
+    """Open and return a connection to the SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Allows accessing columns by name (row["column"])
+    return conn
+
+
+def initialize_database():
+    """
+    Create all tables if they don't already exist.
+    Safe to call on every startup — it won't delete existing data.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+
+    # --- Mission Config Table ---
+    # Stores the single mission start date and your name.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS mission_config (
+            id          INTEGER PRIMARY KEY,
+            start_date  TEXT NOT NULL,
+            your_name   TEXT DEFAULT 'Agent'
+        )
+    """)
+
+    # --- Daily Log Table ---
+    # One row per day. Tracks your daily execution consistency.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS daily_log (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_date        TEXT NOT NULL UNIQUE,
+            focus_hours     REAL DEFAULT 0,
+            apps_submitted  INTEGER DEFAULT 0,
+            labs_completed  INTEGER DEFAULT 0,
+            notes           TEXT DEFAULT ''
+        )
+    """)
+
+    # --- Job Applications Table ---
+    # Every job application you submit goes here.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            company         TEXT NOT NULL,
+            role_title      TEXT NOT NULL,
+            role_category   TEXT NOT NULL,
+            job_url         TEXT DEFAULT '',
+            applied_date    TEXT NOT NULL,
+            status          TEXT DEFAULT 'Applied',
+            follow_up_date  TEXT DEFAULT '',
+            salary_range    TEXT DEFAULT '',
+            notes           TEXT DEFAULT '',
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # --- Skills Checklist Table ---
+    # Tracks your technical skill milestones.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS skill_milestones (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            category    TEXT NOT NULL,
+            milestone   TEXT NOT NULL,
+            done        INTEGER DEFAULT 0,
+            notes       TEXT DEFAULT ''
+        )
+    """)
+
+    # --- Daily Planner Tasks Table ---
+    # Stores the task template for each mission day (day_number 1-50).
+    # Each row is one task block for one day.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS planner_tasks (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            day_number  INTEGER NOT NULL,
+            time_block  TEXT NOT NULL,
+            task_title  TEXT NOT NULL,
+            task_detail TEXT DEFAULT '',
+            category    TEXT DEFAULT 'General',
+            sort_order  INTEGER DEFAULT 0
+        )
+    """)
+
+    # --- Planner Completions Table ---
+    # Tracks which tasks were actually completed on which calendar date.
+    # Separated from planner_tasks so editing a task doesn't wipe completion history.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS planner_completions (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id     INTEGER NOT NULL,
+            done_date   TEXT NOT NULL,
+            done        INTEGER DEFAULT 0,
+            UNIQUE(task_id, done_date)
+        )
+    """)
+
+    # --- Learning Resources Table ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS learning_resources (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            topic           TEXT NOT NULL,
+            skill_category  TEXT NOT NULL,
+            resource_title  TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            url             TEXT DEFAULT '',
+            access_note     TEXT DEFAULT 'Free',
+            learning_obj    TEXT DEFAULT '',
+            sequence_num    INTEGER DEFAULT 0,
+            est_hours       REAL DEFAULT 1.0,
+            practical_ex    TEXT DEFAULT '',
+            expected_output TEXT DEFAULT '',
+            done            INTEGER DEFAULT 0,
+            personal_notes  TEXT DEFAULT '',
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # --- Portfolio Items Table ---
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS portfolio_items (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            title           TEXT NOT NULL,
+            category        TEXT NOT NULL,
+            description     TEXT DEFAULT '',
+            evidence_url    TEXT DEFAULT '',
+            skills_shown    TEXT DEFAULT '',
+            status          TEXT DEFAULT 'In Progress',
+            date_completed  TEXT DEFAULT '',
+            personal_notes  TEXT DEFAULT '',
+            created_at      TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+    _seed_default_milestones()
+    _seed_planner_tasks()
+    _seed_learning_resources()
+
+
+def _seed_default_milestones():
+    """
+    Insert a default set of skill milestones only if the table is empty.
+    These represent a balanced technical job seeker roadmap.
+    """
+    conn = get_connection()
+    c = conn.cursor()
+    count = c.execute("SELECT COUNT(*) FROM skill_milestones").fetchone()[0]
+    if count == 0:
+        defaults = [
+            # Foundational
+            ("Foundations", "Networking fundamentals (OSI, TCP/IP, DNS, DHCP)"),
+            ("Foundations", "Linux command line basics (navigation, permissions, processes)"),
+            ("Foundations", "Windows administration basics (AD, Group Policy, Event Logs)"),
+            # Cybersecurity / SOC
+            ("Cybersecurity", "Set up a home lab (VirtualBox or VMware)"),
+            ("Cybersecurity", "Complete a TryHackMe / HackTheBox beginner path"),
+            ("Cybersecurity", "Understand SIEM basics (Splunk or Elastic free tier)"),
+            ("Cybersecurity", "Study CompTIA Security+ syllabus (or CEH)"),
+            ("Cybersecurity", "Complete one VAPT lab (Nmap, Metasploit, Burp Suite)"),
+            # IT / Technical Support
+            ("IT Support", "Understand ITIL ticketing workflow (incidents, change, problem)"),
+            ("IT Support", "Practice remote desktop support tools (RDP, AnyDesk)"),
+            ("IT Support", "Learn basic scripting for support automation (PowerShell/Bash)"),
+            # Application Support / NOC
+            ("App Support / NOC", "Understand application monitoring concepts (uptime, latency, alerts)"),
+            ("App Support / NOC", "Learn log analysis and basic SQL queries for troubleshooting"),
+            ("App Support / NOC", "Study on-call escalation and incident runbook practices"),
+            # Job Search Execution
+            ("Job Search", "Polish resume for each role category"),
+            ("Job Search", "Create / update LinkedIn profile with relevant keywords"),
+            ("Job Search", "Draft 3 tailored cover letter templates"),
+            ("Job Search", "Reach out to 10 recruiters on LinkedIn"),
+            ("Job Search", "Complete 5 mock technical interviews (use Pramp or peers)"),
+        ]
+        c.executemany(
+            "INSERT INTO skill_milestones (category, milestone) VALUES (?, ?)",
+            defaults
+        )
+        conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MISSION CONFIG
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_mission_config():
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM mission_config WHERE id = 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def set_mission_config(start_date: str, your_name: str):
+    conn = get_connection()
+    conn.execute("DELETE FROM mission_config")
+    conn.execute(
+        "INSERT INTO mission_config (id, start_date, your_name) VALUES (1, ?, ?)",
+        (start_date, your_name)
+    )
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY LOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+def upsert_daily_log(log_date: str, focus_hours: float, apps_submitted: int, labs_completed: int, notes: str):
+    """Insert today's log, or update it if it already exists."""
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO daily_log (log_date, focus_hours, apps_submitted, labs_completed, notes)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(log_date) DO UPDATE SET
+            focus_hours     = excluded.focus_hours,
+            apps_submitted  = excluded.apps_submitted,
+            labs_completed  = excluded.labs_completed,
+            notes           = excluded.notes
+    """, (log_date, focus_hours, apps_submitted, labs_completed, notes))
+    conn.commit()
+    conn.close()
+
+
+def get_all_daily_logs():
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM daily_log ORDER BY log_date DESC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_today_log(today: str):
+    conn = get_connection()
+    row = conn.execute("SELECT * FROM daily_log WHERE log_date = ?", (today,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_streak():
+    """
+    Count the number of consecutive days (ending today or yesterday)
+    where a daily log entry exists.
+    """
+    conn = get_connection()
+    rows = conn.execute("SELECT log_date FROM daily_log ORDER BY log_date DESC").fetchall()
+    conn.close()
+    if not rows:
+        return 0
+    dates = sorted([r["log_date"] for r in rows], reverse=True)
+    today_str = date.today().isoformat()
+    streak = 0
+    check_date = date.today()
+    for d in dates:
+        if d == check_date.isoformat():
+            streak += 1
+            check_date = date.fromordinal(check_date.toordinal() - 1)
+        else:
+            break
+    return streak
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APPLICATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+
+ROLE_CATEGORIES = [
+    "SOC Analyst / Cybersecurity",
+    "VAPT / Security Testing",
+    "IT Support / Technical Support",
+    "Application Support / NOC",
+    "Other Technical Roles",
+]
+
+APPLICATION_STATUSES = [
+    "Applied",
+    "Recruiter Response",
+    "Interview Scheduled",
+    "Interview Done",
+    "Follow-Up Sent",
+    "Offer Received",
+    "Rejected",
+    "Withdrawn",
+]
+
+
+def add_application(company, role_title, role_category, job_url, applied_date,
+                    status, follow_up_date, salary_range, notes):
+    conn = get_connection()
+    conn.execute("""
+        INSERT INTO applications
+            (company, role_title, role_category, job_url, applied_date,
+             status, follow_up_date, salary_range, notes)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (company, role_title, role_category, job_url, applied_date,
+          status, follow_up_date, salary_range, notes))
+    conn.commit()
+    conn.close()
+
+
+def get_all_applications(status_filter=None, category_filter=None):
+    conn = get_connection()
+    query = "SELECT * FROM applications WHERE 1=1"
+    params = []
+    if status_filter and status_filter != "All":
+        query += " AND status = ?"
+        params.append(status_filter)
+    if category_filter and category_filter != "All":
+        query += " AND role_category = ?"
+        params.append(category_filter)
+    query += " ORDER BY applied_date DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def update_application_status(app_id: int, new_status: str, follow_up_date: str = "", notes: str = ""):
+    conn = get_connection()
+    conn.execute("""
+        UPDATE applications
+        SET status = ?, follow_up_date = ?, notes = ?
+        WHERE id = ?
+    """, (new_status, follow_up_date, notes, app_id))
+    conn.commit()
+    conn.close()
+
+
+def delete_application(app_id: int):
+    conn = get_connection()
+    conn.execute("DELETE FROM applications WHERE id = ?", (app_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_application_summary():
+    """Return a dict of status counts for the dashboard metrics."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT status, COUNT(*) as cnt FROM applications GROUP BY status"
+    ).fetchall()
+    conn.close()
+    summary = {r["status"]: r["cnt"] for r in rows}
+    return summary
+
+
+def get_follow_ups_due(today: str):
+    """Return applications where a follow-up is due today or overdue."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT * FROM applications
+        WHERE follow_up_date != '' AND follow_up_date <= ?
+        AND status NOT IN ('Offer Received', 'Rejected', 'Withdrawn')
+        ORDER BY follow_up_date ASC
+    """, (today,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SKILL MILESTONES
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_all_milestones():
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM skill_milestones ORDER BY category, id").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def toggle_milestone(milestone_id: int, done: bool):
+    conn = get_connection()
+    conn.execute("UPDATE skill_milestones SET done = ? WHERE id = ?", (1 if done else 0, milestone_id))
+    conn.commit()
+    conn.close()
+
+
+def add_milestone(category: str, milestone: str):
+    conn = get_connection()
+    conn.execute("INSERT INTO skill_milestones (category, milestone) VALUES (?, ?)", (category, milestone))
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXPORT / BACKUP
+# ─────────────────────────────────────────────────────────────────────────────
+
+def export_to_csv(table_name: str) -> str:
+    """
+    Export a table to a CSV string and return it.
+    Used by the Streamlit download button.
+    """
+    import csv
+    import io
+    conn = get_connection()
+    rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()
+    conn.close()
+    if not rows:
+        return ""
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=rows[0].keys())
+    writer.writeheader()
+    writer.writerows([dict(r) for r in rows])
+    return output.getvalue()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DAILY PLANNER — TASK TEMPLATES
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Time block labels used consistently across the planner
+TIME_BLOCKS = [
+    "Morning  07:00–09:00",
+    "Block 1  09:00–11:00",
+    "Block 2  11:00–13:00",
+    "Break    13:00–14:00",
+    "Block 3  14:00–16:00",
+    "Evening  18:00–20:00",
+]
+
+TASK_CATEGORIES = [
+    "Learning",
+    "Lab / Practical",
+    "Job Search",
+    "Interview Prep",
+    "Portfolio",
+    "Admin / Setup",
+    "Review",
+    "General",
+]
+
+
+def _seed_planner_tasks():
+    """
+    Seed the 50-day mission plan only if the table is empty.
+    Days 1-9: Preparation phase. Day 10+: Active job search phase.
+    Each day has up to 4 focused work blocks (~4 hours total work).
+    """
+    conn = get_connection()
+    count = conn.execute("SELECT COUNT(*) FROM planner_tasks").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+
+    # Format: (day, time_block_label, title, detail, category, sort_order)
+    tasks = [
+        # ── DAY 1 ── Mission Setup & Environment
+        (1, "Morning  07:00–09:00",  "Mission briefing & goal setting",
+         "Write down your 50-day goal. Define target roles, salary expectations, and your top 3 skills to build.", "Admin / Setup", 1),
+        (1, "Block 1  09:00–11:00",  "Set up your tools & workspace",
+         "Install VirtualBox, VS Code, Python, and Obsidian (or Notion). Organise your JARVIS folders.", "Admin / Setup", 2),
+        (1, "Block 2  11:00–13:00",  "Networking fundamentals — OSI & TCP/IP",
+         "Study OSI model layers and TCP/IP stack. Use Professor Messer or free YouTube resources.", "Learning", 3),
+        (1, "Block 3  14:00–16:00",  "Linux basics — navigation & file system",
+         "Practice cd, ls, pwd, mkdir, cp, mv, rm, cat, grep in a terminal. Use TryHackMe Linux Fundamentals Room 1.", "Lab / Practical", 4),
+        (1, "Evening  18:00–20:00",  "Day 1 review & JARVIS log entry",
+         "Complete your JARVIS daily check-in. Write 3 things learned. Plan tomorrow.", "Review", 5),
+
+        # ── DAY 2 ── Linux & Networking Depth
+        (2, "Morning  07:00–09:00",  "Linux — users, permissions & processes",
+         "Study chmod, chown, sudo, ps, top, kill. TryHackMe Linux Fundamentals Room 2.", "Learning", 1),
+        (2, "Block 1  09:00–11:00",  "Networking — DNS, DHCP, HTTP/S, ports",
+         "Understand common ports (22, 80, 443, 3389). Practice with Wireshark basics.", "Learning", 2),
+        (2, "Block 2  11:00–13:00",  "Set up Kali Linux VM",
+         "Install Kali Linux in VirtualBox. Verify tools: nmap, netcat, wireshark are available.", "Admin / Setup", 3),
+        (2, "Block 3  14:00–16:00",  "TryHackMe — Pre-Security path",
+         "Start the TryHackMe Pre-Security learning path (free). Complete at least 2 rooms.", "Lab / Practical", 4),
+        (2, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "Log focus hours and completed labs. Note any concepts that need revisiting.", "Review", 5),
+
+        # ── DAY 3 ── Windows & Active Directory Basics
+        (3, "Morning  07:00–09:00",  "Windows administration basics",
+         "Study Windows Event Logs (Event Viewer), Task Manager, Services, and Registry basics.", "Learning", 1),
+        (3, "Block 1  09:00–11:00",  "Active Directory concepts",
+         "Understand Domain Controllers, Users, Groups, OUs, GPOs. Watch a free AD fundamentals video.", "Learning", 2),
+        (3, "Block 2  11:00–13:00",  "TryHackMe — Active Directory Basics room",
+         "Complete TryHackMe 'Active Directory Basics' room (free).", "Lab / Practical", 3),
+        (3, "Block 3  14:00–16:00",  "PowerShell scripting basics",
+         "Practice Get-Process, Get-Service, Get-EventLog, Write-Output in PowerShell.", "Lab / Practical", 4),
+        (3, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "Update Skills Tracker in JARVIS. Mark completed milestones.", "Review", 5),
+
+        # ── DAY 4 ── SOC & SIEM Introduction
+        (4, "Morning  07:00–09:00",  "SOC roles & responsibilities",
+         "Research SOC Tier 1/2/3 analyst roles. Read a few job descriptions for SOC Analyst positions.", "Learning", 1),
+        (4, "Block 1  09:00–11:00",  "SIEM fundamentals — what it is and why it matters",
+         "Study what a SIEM does (log aggregation, correlation, alerting). Compare Splunk, QRadar, Elastic SIEM.", "Learning", 2),
+        (4, "Block 2  11:00–13:00",  "Splunk free training — Splunk Fundamentals 1",
+         "Register at Splunk Free Training. Begin 'Splunk Fundamentals 1' (free self-paced course).", "Lab / Practical", 3),
+        (4, "Block 3  14:00–16:00",  "TryHackMe — Splunk room or SOC Level 1 path",
+         "Start TryHackMe SOC Level 1 learning path. Complete the first room.", "Lab / Practical", 4),
+        (4, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "What is a SIEM alert? Could you explain it in an interview? Write a brief answer.", "Review", 5),
+
+        # ── DAY 5 ── Threat Intelligence & Security Concepts
+        (5, "Morning  07:00–09:00",  "Cyber threat landscape overview",
+         "Study common attack types: phishing, ransomware, MITM, SQL injection, privilege escalation.", "Learning", 1),
+        (5, "Block 1  09:00–11:00",  "MITRE ATT&CK framework",
+         "Explore attack.mitre.org. Understand Tactics, Techniques, and Procedures (TTPs).", "Learning", 2),
+        (5, "Block 2  11:00–13:00",  "TryHackMe — Cyber Defence path rooms",
+         "Complete TryHackMe rooms on Threat Intelligence and MITRE ATT&CK.", "Lab / Practical", 3),
+        (5, "Block 3  14:00–16:00",  "Nmap basics — network scanning",
+         "Practice nmap -sV, -sC, -O, -p on your local Kali VM lab environment.", "Lab / Practical", 4),
+        (5, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "List 5 attack techniques you now understand. Update skills tracker.", "Review", 5),
+
+        # ── DAY 6 ── Resume Foundation
+        (6, "Morning  07:00–09:00",  "Research target job descriptions",
+         "Find 10 live job postings for SOC Analyst, IT Support, App Support. Copy key requirements.", "Job Search", 1),
+        (6, "Block 1  09:00–11:00",  "Draft your base resume",
+         "Write a clean 1-page resume. Include: summary, skills, experience/projects, education, certifications.", "Portfolio", 2),
+        (6, "Block 2  11:00–13:00",  "Resume keyword optimisation",
+         "Compare your resume to job descriptions. Add missing keywords. Use simple ATS-friendly formatting.", "Portfolio", 3),
+        (6, "Block 3  14:00–16:00",  "LinkedIn profile setup",
+         "Update LinkedIn headline, about section, skills, and experience. Add 'Open to Work'.", "Job Search", 4),
+        (6, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "Save resume version 1 to data/resumes/. Log today's work.", "Review", 5),
+
+        # ── DAY 7 ── VAPT & Security Testing Introduction
+        (7, "Morning  07:00–09:00",  "Penetration testing methodology",
+         "Study the 5 phases: Recon, Scanning, Exploitation, Post-Exploitation, Reporting.", "Learning", 1),
+        (7, "Block 1  09:00–11:00",  "Burp Suite basics",
+         "Open Burp Suite Community Edition. Learn the proxy, repeater, and spider tabs.", "Lab / Practical", 2),
+        (7, "Block 2  11:00–13:00",  "TryHackMe — Burp Suite basics room",
+         "Complete TryHackMe 'Burp Suite: The Basics' room.", "Lab / Practical", 3),
+        (7, "Block 3  14:00–16:00",  "OWASP Top 10 overview",
+         "Read the OWASP Top 10 (owasp.org). Understand injection, broken auth, IDOR, XSS.", "Learning", 4),
+        (7, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "Could you explain a SQL injection attack in an interview? Write a 3-sentence answer.", "Review", 5),
+
+        # ── DAY 8 ── IT & Application Support Skills
+        (8, "Morning  07:00–09:00",  "ITIL framework basics",
+         "Study Incident, Problem, Change Management concepts. Know the difference between them.", "Learning", 1),
+        (8, "Block 1  09:00–11:00",  "Ticketing systems — ServiceNow / Jira overview",
+         "Watch a free ServiceNow or Jira tutorial. Understand ticket lifecycle and SLA concepts.", "Learning", 2),
+        (8, "Block 2  11:00–13:00",  "SQL basics for log analysis",
+         "Practice SELECT, WHERE, ORDER BY, GROUP BY, COUNT on a sample database (use DB Browser for SQLite).", "Lab / Practical", 3),
+        (8, "Block 3  14:00–16:00",  "Application monitoring concepts",
+         "Study uptime monitoring, latency, error rates, alerting. Research tools: Grafana, Nagios, Zabbix.", "Learning", 4),
+        (8, "Evening  18:00–20:00",  "Review & JARVIS check-in",
+         "Write a one-paragraph summary of ITIL incident management in your own words.", "Review", 5),
+
+        # ── DAY 9 ── Final Prep & Day 10 Launch Readiness ──
+        (9, "Morning  07:00–09:00",  "MILESTONE: Day 10 launch checklist review",
+         "Check: Resume ready? LinkedIn updated? Cover letter template drafted? TryHackMe progress noted?", "Admin / Setup", 1),
+        (9, "Block 1  09:00–11:00",  "Draft cover letter templates (3 versions)",
+         "Write SOC/Cybersecurity, IT Support, and Application Support cover letter templates. Save to data/notes/.", "Portfolio", 2),
+        (9, "Block 2  11:00–13:00",  "Interview prep — common technical questions",
+         "Prepare answers for: Tell me about yourself. What is a firewall? What is an IP address? Walk me through TCP/IP.", "Interview Prep", 3),
+        (9, "Block 3  14:00–16:00",  "Recruiter outreach plan",
+         "Identify 20 recruiters on LinkedIn in IT/Cybersecurity. Prepare a connection request message template.", "Job Search", 4),
+        (9, "Evening  18:00–20:00",  "🚀 LAUNCH READY REVIEW — Day 9 complete",
+         "Final check-in. Confirm all preparation milestones. Tomorrow you go live. Log this moment in JARVIS notes.", "Review", 5),
+
+        # ── DAY 10 ── ACTIVE JOB SEARCH BEGINS ──
+        (10, "Morning  07:00–09:00", "🚀 Day 10 — Active Job Search Begins",
+         "Mission phase 2 starts today. Apply to 3–5 positions. Prioritise quality applications over volume.", "Job Search", 1),
+        (10, "Block 1  09:00–11:00", "Submit first wave of applications",
+         "Apply to 3 roles: 1 cybersecurity/SOC, 1 IT support, 1 app support. Log each in JARVIS Applications.", "Job Search", 2),
+        (10, "Block 2  11:00–13:00", "LinkedIn recruiter outreach",
+         "Send 10 personalised connection requests to IT/Cybersecurity recruiters. Keep the message brief and professional.", "Job Search", 3),
+        (10, "Block 3  14:00–16:00", "Continue TryHackMe — SOC Level 1 path",
+         "Complete 2 more rooms. Keep building verifiable credentials and portfolio evidence.", "Lab / Practical", 4),
+        (10, "Evening  18:00–20:00", "Review responses & follow-up plan",
+         "Check email and LinkedIn. Log any responses in JARVIS. Set follow-up reminders for 5 days out.", "Review", 5),
+    ]
+
+    # Days 11–50: Repeating pattern of Apply + Learn + Interview Prep + Review
+    # We generate a structured template for each remaining day
+    day_11_50_templates = [
+        ("Morning  07:00–09:00",  "Morning review & priority setting",
+         "Check JARVIS for follow-ups due. Set today's top 3 priorities.", "Admin / Setup", 1),
+        ("Block 1  09:00–11:00",  "Apply to 3–5 positions",
+         "Submit targeted applications. Tailor your resume keywords to match each job description.", "Job Search", 2),
+        ("Block 2  11:00–13:00",  "Technical skill building",
+         "Continue TryHackMe, Splunk training, or a lab exercise relevant to your target role.", "Lab / Practical", 3),
+        ("Block 3  14:00–16:00",  "Interview prep or portfolio work",
+         "Practise answering 5 technical interview questions aloud. Or add a lab write-up to your portfolio.", "Interview Prep", 4),
+        ("Evening  18:00–20:00",  "Evening review & JARVIS check-in",
+         "Log applications, hours, and labs. Check for recruiter replies. Update application statuses.", "Review", 5),
+    ]
+
+    for day in range(11, 51):
+        for (tb, title, detail, cat, order) in day_11_50_templates:
+            tasks.append((day, tb, title, detail, cat, order))
+
+    conn.executemany(
+        """INSERT INTO planner_tasks
+           (day_number, time_block, task_title, task_detail, category, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        tasks
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_tasks_for_day(day_number: int):
+    """Return all task rows for a given mission day, ordered by sort_order."""
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT * FROM planner_tasks WHERE day_number = ? ORDER BY sort_order",
+        (day_number,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_completion_for_day(day_number: int, done_date: str) -> dict:
+    """
+    Return a dict mapping task_id -> done (0 or 1)
+    for a specific mission day and calendar date.
+    """
+    conn = get_connection()
+    task_ids = [
+        r["id"] for r in
+        conn.execute("SELECT id FROM planner_tasks WHERE day_number = ?", (day_number,)).fetchall()
+    ]
+    if not task_ids:
+        conn.close()
+        return {}
+    placeholders = ",".join("?" * len(task_ids))
+    rows = conn.execute(
+        f"SELECT task_id, done FROM planner_completions WHERE task_id IN ({placeholders}) AND done_date = ?",
+        task_ids + [done_date]
+    ).fetchall()
+    conn.close()
+    return {r["task_id"]: r["done"] for r in rows}
+
+
+def set_task_completion(task_id: int, done_date: str, done: bool):
+    """Mark a single task as done or not-done for a specific calendar date."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO planner_completions (task_id, done_date, done)
+           VALUES (?, ?, ?)
+           ON CONFLICT(task_id, done_date) DO UPDATE SET done = excluded.done""",
+        (task_id, done_date, 1 if done else 0)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_day_completion_pct(day_number: int, done_date: str) -> float:
+    """Return 0.0–1.0 completion percentage for a mission day on a calendar date."""
+    tasks = get_tasks_for_day(day_number)
+    if not tasks:
+        return 0.0
+    completions = get_completion_for_day(day_number, done_date)
+    done_count = sum(1 for t in tasks if completions.get(t["id"], 0) == 1)
+    return done_count / len(tasks)
+
+
+def update_planner_task(task_id: int, task_title: str, task_detail: str, time_block: str, category: str):
+    """Edit the title/detail/time_block/category of an existing planner task."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE planner_tasks
+           SET task_title = ?, task_detail = ?, time_block = ?, category = ?
+           WHERE id = ?""",
+        (task_title, task_detail, time_block, category, task_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_planner_task(day_number: int, time_block: str, task_title: str, task_detail: str, category: str):
+    """Add a new custom task to a mission day."""
+    conn = get_connection()
+    max_order = conn.execute(
+        "SELECT MAX(sort_order) FROM planner_tasks WHERE day_number = ?", (day_number,)
+    ).fetchone()[0] or 0
+    conn.execute(
+        """INSERT INTO planner_tasks (day_number, time_block, task_title, task_detail, category, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (day_number, time_block, task_title, task_detail, category, max_order + 1)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_planner_task(task_id: int):
+    """Delete a planner task (and all its completion records)."""
+    conn = get_connection()
+    conn.execute("DELETE FROM planner_completions WHERE task_id = ?", (task_id,))
+    conn.execute("DELETE FROM planner_tasks WHERE id = ?", (task_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_planner_history(start_day: int = 1, end_day: int = 50) -> list:
+    """
+    Return per-day completion summary for a range of mission days.
+    Used for the weekly/overall progress view.
+    Returns list of dicts: {day_number, total_tasks, done_tasks, pct}
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        """SELECT pt.day_number,
+                  COUNT(pt.id) as total_tasks,
+                  COALESCE(SUM(pc.done), 0) as done_tasks
+           FROM planner_tasks pt
+           LEFT JOIN planner_completions pc ON pc.task_id = pt.id
+           WHERE pt.day_number BETWEEN ? AND ?
+           GROUP BY pt.day_number
+           ORDER BY pt.day_number""",
+        (start_day, end_day)
+    ).fetchall()
+    conn.close()
+    result = []
+    for r in rows:
+        total = r["total_tasks"]
+        done  = r["done_tasks"]
+        result.append({
+            "day_number": r["day_number"],
+            "total_tasks": total,
+            "done_tasks": done,
+            "pct": round((done / total) * 100, 1) if total else 0.0,
+        })
+    return result
+
+
+def force_reseed_planner():
+    """
+    Clears all planner_tasks and planner_completions and reseeds from scratch.
+    Only called when the user explicitly requests it from the UI.
+    WARNING: This deletes all planner completion history.
+    """
+    conn = get_connection()
+    conn.execute("DELETE FROM planner_completions")
+    conn.execute("DELETE FROM planner_tasks")
+    conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('planner_tasks','planner_completions')")
+    conn.commit()
+    conn.close()
+    _seed_planner_tasks_v2()
+
+
+def _seed_planner_tasks_v2():
+    """
+    Seeds the NEW detailed 50-day plan.
+    Days 1-9: specific, structured preparation tasks.
+    Days 10-50: active job search repeating template.
+    """
+    conn = get_connection()
+    count = conn.execute("SELECT COUNT(*) FROM planner_tasks").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+
+    tasks = [
+        # ── DAY 1 ── Career baseline and technical assessment
+        (1, "Block 1  09:00–11:00", "Review resume and career direction",
+         "Open your current resume. List every role you are targeting. Write down your top 5 technical skills and your top 3 skill gaps.",
+         "Admin / Setup", 1),
+        (1, "Block 2  11:00–13:00", "Technical self-assessment",
+         "Rate yourself 1-5 on: Networking, Windows admin, Linux, Cybersecurity basics, Troubleshooting. Be honest — this baseline guides the next 8 days.",
+         "Review", 2),
+        (1, "Block 3  14:00–16:00", "Organise career notes and evidence folders",
+         "Create folders: data/resumes/, data/notes/, data/portfolio/. Save your current resume. Start a notes file for each skill area.",
+         "Admin / Setup", 3),
+        (1, "Evening  18:00–20:00", "Day 1 review and JARVIS check-in",
+         "Log your self-assessment scores in JARVIS notes. Identify your top 3 weak areas to focus on this week.",
+         "Review", 4),
+
+        # ── DAY 2 ── Networking fundamentals
+        (2, "Morning  07:00–09:00", "IP addressing and subnetting basics",
+         "Study IPv4 addressing, subnet masks, CIDR notation. Practice reading /24, /16, /8 networks. Use Cisco Skills for All (free).",
+         "Learning", 1),
+        (2, "Block 1  09:00–11:00", "DNS, DHCP, TCP, UDP and common ports",
+         "Understand how DNS resolves names. How DHCP assigns IPs. Difference between TCP and UDP. Memorise ports: 22 SSH, 80 HTTP, 443 HTTPS, 3389 RDP, 53 DNS, 25 SMTP.",
+         "Learning", 2),
+        (2, "Block 2  11:00–13:00", "Routing, gateways, HTTP and HTTPS",
+         "Understand default gateways, routing tables, and what happens when you open a website. Study HTTP request-response cycle.",
+         "Learning", 3),
+        (2, "Block 3  14:00–16:00", "Windows networking commands practice",
+         "Open CMD and practice: ipconfig, ipconfig /all, ping, tracert, nslookup, netstat -an. Document each command output.",
+         "Lab / Practical", 4),
+        (2, "Evening  18:00–20:00", "Networking review and notes",
+         "Write a one-page networking summary in your own words. What would you say if asked 'explain how DNS works' in an interview?",
+         "Review", 5),
+
+        # ── DAY 3 ── Windows and IT Support
+        (3, "Morning  07:00–09:00", "Windows troubleshooting methodology",
+         "Learn the structured approach: define, reproduce, isolate, resolve, document. Apply it to 3 hypothetical scenarios.",
+         "Learning", 1),
+        (3, "Block 1  09:00–11:00", "User accounts, permissions and services",
+         "Study local vs domain accounts, UAC, NTFS permissions. Use Computer Management to view users and groups. Study services: start, stop, automatic vs manual.",
+         "Lab / Practical", 2),
+        (3, "Block 2  11:00–13:00", "Event Viewer and Task Manager",
+         "Open Event Viewer. Find System and Application logs. Identify an error or warning. Use Task Manager to view processes, CPU and memory usage.",
+         "Lab / Practical", 3),
+        (3, "Block 3  14:00–16:00", "Device Manager and system troubleshooting",
+         "Review Device Manager for driver issues. Practice: msconfig, msinfo32, resmon. Run sfc /scannow in an elevated CMD.",
+         "Lab / Practical", 4),
+        (3, "Evening  18:00–20:00", "IT Support interview preparation",
+         "Prepare answers to: How do you troubleshoot a PC that cannot connect to the internet? Walk me through resetting a user password in Windows.",
+         "Interview Prep", 5),
+
+        # ── DAY 4 ── Linux fundamentals
+        (4, "Morning  07:00–09:00", "Linux file system navigation",
+         "Study the Linux directory structure: /, /home, /etc, /var, /tmp, /usr. Practice cd, ls -la, pwd, mkdir, touch, cp, mv, rm.",
+         "Learning", 1),
+        (4, "Block 1  09:00–11:00", "File permissions, ownership and processes",
+         "Understand rwx permissions, chmod numeric and symbolic. Study chown. Use ps aux, top, kill to manage processes.",
+         "Lab / Practical", 2),
+        (4, "Block 2  11:00–13:00", "Services, logs and shell commands",
+         "Use systemctl start/stop/status/enable. Read /var/log/syslog and /var/log/auth.log. Use grep, cat, tail -f, find, man.",
+         "Lab / Practical", 3),
+        (4, "Block 3  14:00–16:00", "Linux practical exercises",
+         "Complete TryHackMe Linux Fundamentals Room 1 (free). If no VM, use the in-browser terminal on TryHackMe.",
+         "Lab / Practical", 4),
+        (4, "Evening  18:00–20:00", "Linux review and notes",
+         "Write 10 Linux commands you learned today with a one-line description of each. Save to data/notes/linux_commands.txt",
+         "Review", 5),
+
+        # ── DAY 5 ── Cybersecurity and SOC fundamentals
+        (5, "Morning  07:00–09:00", "CIA triad, threats, vulnerabilities and risk",
+         "Study Confidentiality, Integrity, Availability. Understand the difference between a threat, vulnerability and risk. Study common attack types: phishing, ransomware, MITM.",
+         "Learning", 1),
+        (5, "Block 1  09:00–11:00", "Malware, incident response and SOC workflows",
+         "Study malware types: virus, worm, trojan, ransomware, spyware. Understand a basic IR lifecycle: Identify, Contain, Eradicate, Recover, Review.",
+         "Learning", 2),
+        (5, "Block 2  11:00–13:00", "SIEM, EDR and IDS/IPS concepts",
+         "Understand what a SIEM does: collect logs, correlate events, raise alerts. Study EDR vs antivirus. Study IDS (detect) vs IPS (prevent).",
+         "Learning", 3),
+        (5, "Block 3  14:00–16:00", "TryHackMe Cybersecurity 101 path",
+         "Register at TryHackMe (free). Start the Cybersecurity 101 path. Complete the first 2-3 rooms. Note: some rooms require a subscription.",
+         "Lab / Practical", 4),
+        (5, "Evening  18:00–20:00", "SOC interview preparation",
+         "Prepare answers to: What is a SIEM? How would you investigate a phishing alert? What is the difference between IDS and IPS?",
+         "Interview Prep", 5),
+
+        # ── DAY 6 ── Logs and security investigation
+        (6, "Morning  07:00–09:00", "Log interpretation and structure",
+         "Understand log components: timestamp, source IP, destination IP, event type, user, action, result. Study Windows Event IDs: 4624 (login), 4625 (failed login), 4688 (process creation).",
+         "Learning", 1),
+        (6, "Block 1  09:00–11:00", "Identifying suspicious patterns in logs",
+         "Study what makes a log entry suspicious: off-hours logins, repeated failures, unusual source IPs, privilege escalation. Use TryHackMe SIEM rooms.",
+         "Learning", 2),
+        (6, "Block 2  11:00–13:00", "Basic alert investigation exercise",
+         "Take a sample set of logs (use TryHackMe or a free SIEM lab). Identify the timeline of an event. Determine source, target and action.",
+         "Lab / Practical", 3),
+        (6, "Block 3  14:00–16:00", "Splunk free training",
+         "Register at Splunk Training (free tier). Begin Splunk Fundamentals 1. Note: free tier has limited access. Use what is available.",
+         "Lab / Practical", 4),
+        (6, "Evening  18:00–20:00", "Log investigation review",
+         "Write a short incident summary from today's lab exercise: What happened? When? Who was involved? What action should be taken?",
+         "Portfolio", 5),
+
+        # ── DAY 7 ── Application Support and NOC troubleshooting
+        (7, "Morning  07:00–09:00", "Structured troubleshooting methodology",
+         "Study the OSI model as a troubleshooting framework. Learn to work top-down or bottom-up. Study the 5 Whys method.",
+         "Learning", 1),
+        (7, "Block 1  09:00–11:00", "DNS, connectivity and application failures",
+         "Practice diagnosing: website unreachable, DNS not resolving, application not loading. Use ping, nslookup, tracert, curl.",
+         "Lab / Practical", 2),
+        (7, "Block 2  11:00–13:00", "Account, permission and resource issues",
+         "Study common issues: access denied, locked accounts, permission errors, high CPU and memory. Document investigation steps.",
+         "Learning", 3),
+        (7, "Block 3  14:00–16:00", "Escalation and documentation practice",
+         "Write an escalation note for a hypothetical production incident. Include: impact, timeline, steps taken, current status, next action.",
+         "Portfolio", 4),
+        (7, "Evening  18:00–20:00", "Application Support interview preparation",
+         "Prepare answers to: How do you handle a production outage? A user reports an application is slow — what do you do?",
+         "Interview Prep", 5),
+
+        # ── DAY 8 ── Portfolio and professional readiness
+        (8, "Morning  07:00–09:00", "GitHub profile and project review",
+         "Open your GitHub profile. If empty, create an account. Plan one project to add: a troubleshooting script, a network scanner or a simple automation.",
+         "Portfolio", 1),
+        (8, "Block 1  09:00–11:00", "Write or improve a technical project",
+         "Create or improve a project in GitHub. Add at minimum: a clear README, a description, and what problem it solves.",
+         "Portfolio", 2),
+        (8, "Block 2  11:00–13:00", "Write a technical case study",
+         "Document one real or hypothetical technical scenario you resolved. Include: problem, investigation steps, root cause, solution, lessons learned.",
+         "Portfolio", 3),
+        (8, "Block 3  14:00–16:00", "Add evidence and screenshots",
+         "Take screenshots of tools, terminals or labs you have used this week. Add them to data/portfolio/. Write one-line captions.",
+         "Portfolio", 4),
+        (8, "Evening  18:00–20:00", "Prepare project explanation",
+         "Practice explaining your GitHub project or case study in under 2 minutes. Record yourself or write it out. This will be used in interviews.",
+         "Interview Prep", 5),
+
+        # ── DAY 9 ── Interview and application readiness
+        (9, "Morning  07:00–09:00", "Technical interview question review",
+         "Review and practise answers to: Tell me about yourself. What is your strongest technical skill? Why cybersecurity or IT support? How do you stay current with technology?",
+         "Interview Prep", 1),
+        (9, "Block 1  09:00–11:00", "Resume final review",
+         "Read your resume as if you are the interviewer. Is every bullet point relevant? Are technical keywords present? Is the format clean and ATS-friendly?",
+         "Job Search", 2),
+        (9, "Block 2  11:00–13:00", "Professional introduction and LinkedIn",
+         "Write a 60-second professional introduction. Update LinkedIn headline, about section and skills. Add Open to Work if comfortable.",
+         "Job Search", 3),
+        (9, "Block 3  14:00–16:00", "Prepare Day 10 application launch",
+         "Research 10 live job postings for SOC Analyst, IT Support, App Support. Save links. Identify 5 recruiters to contact on LinkedIn. Set up job alerts.",
+         "Job Search", 4),
+        (9, "Evening  18:00–20:00", "🚀 LAUNCH READY REVIEW — Day 9 complete",
+         "Confirm: Resume polished. LinkedIn updated. Cover letter template drafted. 10 job links saved. Recruiter list ready. You begin applying tomorrow.",
+         "Review", 5),
+    ]
+
+    # Days 10-50: repeating daily template
+    day_10_50_templates = [
+        ("Morning  07:00–09:00", "Morning review and priority setting",
+         "Check JARVIS for follow-ups due. Review yesterday's incomplete tasks. Set today's top 3 priorities: applications, learning and portfolio.",
+         "Admin / Setup", 1),
+        ("Block 1  09:00–11:00", "Apply to 3-5 positions",
+         "Submit targeted applications. Match resume keywords to each job description. Log each application in JARVIS with follow-up dates.",
+         "Job Search", 2),
+        ("Block 2  11:00–13:00", "Technical skill development",
+         "Continue your chosen learning path: TryHackMe, Splunk training, Microsoft Learn or Linux Journey. Aim to complete one room or module.",
+         "Learning", 3),
+        ("Block 3  14:00–16:00", "Portfolio or interview preparation",
+         "Rotate between: writing a case study, improving GitHub, practising interview questions, documenting a lab exercise.",
+         "Interview Prep", 4),
+        ("Evening  18:00–20:00", "Evening review and JARVIS check-in",
+         "Log applications, focus hours and labs completed. Check for recruiter replies. Update application statuses. Note one thing learned today.",
+         "Review", 5),
+    ]
+
+    for day in range(10, 51):
+        for (tb, title, detail, cat, order) in day_10_50_templates:
+            tasks.append((day, tb, title, detail, cat, order))
+
+    conn.executemany(
+        """INSERT INTO planner_tasks
+           (day_number, time_block, task_title, task_detail, category, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        tasks
+    )
+    conn.commit()
+    conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LEARNING RESOURCES
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESOURCE_CATEGORIES = [
+    "Networking",
+    "IT Support",
+    "Linux / DevOps",
+    "Cybersecurity / SOC",
+    "App Support / NOC",
+    "Job Search",
+    "Other",
+]
+
+
+def _seed_learning_resources():
+    """Seed default learning resources only if the table is empty."""
+    conn = get_connection()
+    count = conn.execute("SELECT COUNT(*) FROM learning_resources").fetchone()[0]
+    if count > 0:
+        conn.close()
+        return
+
+    resources = [
+        (
+            "Networking", "Networking",
+            "Cisco Skills for All — Networking Basics",
+            "Cisco / Skills for All",
+            "https://skillsforall.com/",
+            "Free with registration",
+            "Understand IP addressing, subnetting, DNS, DHCP, TCP/IP and common protocols",
+            1, 8.0,
+            "Complete the Networking Basics course. Use Windows CMD to run ipconfig, ping, tracert and nslookup.",
+            "Can explain how data moves from your browser to a web server and back."
+        ),
+        (
+            "Windows / IT Support", "IT Support",
+            "Microsoft Learn — Windows Server and IT Support",
+            "Microsoft",
+            "https://learn.microsoft.com/training/",
+            "Free with Microsoft account",
+            "Understand Windows administration, Active Directory, troubleshooting and support workflows",
+            2, 10.0,
+            "Complete at least one Microsoft Learn path on Windows Server fundamentals or IT support.",
+            "Able to describe how to troubleshoot a user account issue or a PC that cannot connect to the network."
+        ),
+        (
+            "Linux", "Linux / DevOps",
+            "Linux Journey — Interactive Linux Learning",
+            "Linux Journey",
+            "https://linuxjourney.com/",
+            "Completely free, no account required",
+            "Navigate the Linux file system, manage files and permissions, use shell commands and understand processes",
+            3, 6.0,
+            "Complete the Grasshopper and Journeyman sections. Practice each command in a terminal or TryHackMe room.",
+            "Comfortable navigating Linux, managing files and reading system logs."
+        ),
+        (
+            "Cybersecurity Fundamentals", "Cybersecurity / SOC",
+            "TryHackMe — Cybersecurity 101 Path",
+            "TryHackMe",
+            "https://tryhackme.com/path/outline/cybersecurity101",
+            "Free account required. Some rooms are free; others require a subscription. Check before starting.",
+            "Understand core cybersecurity concepts: CIA triad, threats, common attacks, and basic defence strategies",
+            4, 12.0,
+            "Complete the free rooms in the Cybersecurity 101 path. Take notes on each topic.",
+            "Can explain core security concepts and common attack types in an interview."
+        ),
+        (
+            "SOC Analyst Preparation", "Cybersecurity / SOC",
+            "TryHackMe — SOC Level 1 Path",
+            "TryHackMe",
+            "https://tryhackme.com/path/outline/soclevel1",
+            "Free account required. Many rooms in this path require a paid subscription. Check room availability before planning.",
+            "Understand SOC workflows, log analysis, SIEM basics, alert triage and incident investigation",
+            5, 20.0,
+            "Complete available free rooms. Document your investigation process for each exercise.",
+            "Able to describe SOC workflows and walk through a basic alert investigation in an interview."
+        ),
+        (
+            "SIEM and Log Analysis", "Cybersecurity / SOC",
+            "Splunk Free Training — Splunk Fundamentals 1",
+            "Splunk",
+            "https://www.splunk.com/en_us/training.html",
+            "Free registration required. Splunk Fundamentals 1 is free. Advanced courses require payment.",
+            "Learn to search, analyse and visualise data in Splunk. Understand SPL (Splunk Processing Language) basics.",
+            6, 8.0,
+            "Complete Splunk Fundamentals 1. Run sample searches and create a basic dashboard.",
+            "Can perform basic log searches and explain what a SIEM alert investigation looks like."
+        ),
+        (
+            "Application Support and NOC", "App Support / NOC",
+            "ITIL Foundation — Free Study Resources",
+            "Various (Axelos, YouTube, Udemy free previews)",
+            "https://www.axelos.com/certifications/itil-service-management/",
+            "ITIL certification requires payment. Study materials and YouTube resources are free. Full exam requires a voucher.",
+            "Understand IT service management: incident, problem and change management. Learn SLA concepts and escalation procedures.",
+            7, 5.0,
+            "Study the incident management lifecycle. Write a mock incident report for a hypothetical production issue.",
+            "Can describe the difference between an incident and a problem, and explain an escalation process."
+        ),
+        (
+            "Interview Preparation", "Job Search",
+            "Common Technical Interview Questions — Free Preparation",
+            "Various (Glassdoor, LinkedIn, InterviewBit)",
+            "https://www.glassdoor.co.in/Interview/index.htm",
+            "Free basic access. Some employer-specific questions require a free account.",
+            "Prepare structured answers to common IT and cybersecurity interview questions using the STAR method.",
+            8, 4.0,
+            "Write out answers to 10 common questions: Tell me about yourself, How do you troubleshoot a network issue, What is a firewall, Describe a time you resolved a technical problem.",
+            "Confident, structured answers to at least 10 common technical interview questions."
+        ),
+    ]
+
+    conn.executemany(
+        """INSERT INTO learning_resources
+           (topic, skill_category, resource_title, provider, url, access_note,
+            learning_obj, sequence_num, est_hours, practical_ex, expected_output)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        resources
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_all_resources(category_filter=None) -> list:
+    """Return all learning resources, optionally filtered by skill_category."""
+    conn = get_connection()
+    if category_filter and category_filter != "All":
+        rows = conn.execute(
+            "SELECT * FROM learning_resources WHERE skill_category = ? ORDER BY sequence_num",
+            (category_filter,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM learning_resources ORDER BY sequence_num"
+        ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_resource(topic, skill_category, resource_title, provider, url,
+                 access_note, learning_obj, sequence_num, est_hours,
+                 practical_ex, expected_output) -> None:
+    """Add a new learning resource."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO learning_resources
+           (topic, skill_category, resource_title, provider, url, access_note,
+            learning_obj, sequence_num, est_hours, practical_ex, expected_output)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (topic, skill_category, resource_title, provider, url, access_note,
+         learning_obj, sequence_num, est_hours, practical_ex, expected_output)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_resource(resource_id: int, topic=None, skill_category=None,
+                    resource_title=None, provider=None, url=None,
+                    access_note=None, learning_obj=None, sequence_num=None,
+                    est_hours=None, practical_ex=None, expected_output=None,
+                    done=None, personal_notes=None) -> None:
+    """Update fields of an existing learning resource. Only non-None values are updated."""
+    conn = get_connection()
+    fields = {
+        "topic": topic,
+        "skill_category": skill_category,
+        "resource_title": resource_title,
+        "provider": provider,
+        "url": url,
+        "access_note": access_note,
+        "learning_obj": learning_obj,
+        "sequence_num": sequence_num,
+        "est_hours": est_hours,
+        "practical_ex": practical_ex,
+        "expected_output": expected_output,
+        "done": done,
+        "personal_notes": personal_notes,
+    }
+    updates = {k: v for k, v in fields.items() if v is not None}
+    if not updates:
+        conn.close()
+        return
+    set_clause = ", ".join(f"{k} = ?" for k in updates)
+    values = list(updates.values()) + [resource_id]
+    conn.execute(f"UPDATE learning_resources SET {set_clause} WHERE id = ?", values)
+    conn.commit()
+    conn.close()
+
+
+def delete_resource(resource_id: int) -> None:
+    """Delete a learning resource by ID."""
+    conn = get_connection()
+    conn.execute("DELETE FROM learning_resources WHERE id = ?", (resource_id,))
+    conn.commit()
+    conn.close()
+
+
+def toggle_resource_done(resource_id: int, done: bool) -> None:
+    """Mark a learning resource as done or not done."""
+    conn = get_connection()
+    conn.execute(
+        "UPDATE learning_resources SET done = ? WHERE id = ?",
+        (1 if done else 0, resource_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_resource_summary() -> dict:
+    """Return total and done counts, overall and per category."""
+    conn = get_connection()
+    total = conn.execute("SELECT COUNT(*) FROM learning_resources").fetchone()[0]
+    done  = conn.execute("SELECT COUNT(*) FROM learning_resources WHERE done = 1").fetchone()[0]
+    rows  = conn.execute(
+        """SELECT skill_category,
+                  COUNT(*) as total,
+                  SUM(done) as done_count
+           FROM learning_resources
+           GROUP BY skill_category"""
+    ).fetchall()
+    conn.close()
+    by_category = {
+        r["skill_category"]: {"total": r["total"], "done": r["done_count"] or 0}
+        for r in rows
+    }
+    return {
+        "total": total,
+        "done": done,
+        "by_category": by_category,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PORTFOLIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+PORTFOLIO_CATEGORIES = [
+    "GitHub Project",
+    "Technical Case Study",
+    "Troubleshooting Report",
+    "Security Investigation",
+    "Lab Write-Up",
+    "Screenshot / Evidence",
+    "Documentation",
+    "Other",
+]
+
+PORTFOLIO_STATUSES = [
+    "In Progress",
+    "Complete",
+    "Needs Improvement",
+]
+
+
+def get_all_portfolio_items(category_filter=None, status_filter=None) -> list:
+    """Return all portfolio items, optionally filtered by category and/or status."""
+    conn = get_connection()
+    query = "SELECT * FROM portfolio_items WHERE 1=1"
+    params = []
+    if category_filter and category_filter != "All":
+        query += " AND category = ?"
+        params.append(category_filter)
+    if status_filter and status_filter != "All":
+        query += " AND status = ?"
+        params.append(status_filter)
+    query += " ORDER BY created_at DESC"
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_portfolio_item(title, category, description, evidence_url,
+                       skills_shown, status, date_completed, personal_notes) -> None:
+    """Add a new portfolio item."""
+    conn = get_connection()
+    conn.execute(
+        """INSERT INTO portfolio_items
+           (title, category, description, evidence_url, skills_shown,
+            status, date_completed, personal_notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (title, category, description, evidence_url, skills_shown,
+         status, date_completed, personal_notes)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_portfolio_item(item_id: int, title, category, description,
+                          evidence_url, skills_shown, status,
+                          date_completed, personal_notes) -> None:
+    """Update all fields of an existing portfolio item."""
+    conn = get_connection()
+    conn.execute(
+        """UPDATE portfolio_items
+           SET title = ?, category = ?, description = ?, evidence_url = ?,
+               skills_shown = ?, status = ?, date_completed = ?, personal_notes = ?
+           WHERE id = ?""",
+        (title, category, description, evidence_url, skills_shown,
+         status, date_completed, personal_notes, item_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_portfolio_item(item_id: int) -> None:
+    """Delete a portfolio item by ID."""
+    conn = get_connection()
+    conn.execute("DELETE FROM portfolio_items WHERE id = ?", (item_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_portfolio_summary() -> dict:
+    """Return total items, completed items, and categories covered."""
+    conn = get_connection()
+    total     = conn.execute("SELECT COUNT(*) FROM portfolio_items").fetchone()[0]
+    completed = conn.execute(
+        "SELECT COUNT(*) FROM portfolio_items WHERE status = 'Complete'"
+    ).fetchone()[0]
+    rows = conn.execute(
+        "SELECT DISTINCT category FROM portfolio_items"
+    ).fetchall()
+    conn.close()
+    categories = [r["category"] for r in rows]
+    return {
+        "total": total,
+        "completed": completed,
+        "categories_covered": categories,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DASHBOARD AGGREGATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_dashboard_summary(today: str, mission_day: int) -> dict:
+    """
+    Returns a single dict of all numbers needed by Mission Control.
+    """
+    conn = get_connection()
+    # Applications
+    app_rows = conn.execute("SELECT status, COUNT(*) as cnt FROM applications GROUP BY status").fetchall()
+    app_summary = {r["status"]: r["cnt"] for r in app_rows}
+    # Resources
+    total_res = conn.execute("SELECT COUNT(*) FROM learning_resources").fetchone()[0]
+    done_res  = conn.execute("SELECT COUNT(*) FROM learning_resources WHERE done=1").fetchone()[0]
+    # Portfolio
+    total_port = conn.execute("SELECT COUNT(*) FROM portfolio_items").fetchone()[0]
+    done_port  = conn.execute("SELECT COUNT(*) FROM portfolio_items WHERE status='Complete'").fetchone()[0]
+    # Planner for today
+    tasks_today = conn.execute(
+        "SELECT COUNT(*) FROM planner_tasks WHERE day_number=?", (mission_day,)
+    ).fetchone()[0]
+    done_today = conn.execute(
+        """SELECT COUNT(*) FROM planner_completions pc
+           JOIN planner_tasks pt ON pc.task_id=pt.id
+           WHERE pt.day_number=? AND pc.done_date=? AND pc.done=1""",
+        (mission_day, today)
+    ).fetchone()[0]
+    # Follow-ups
+    followups = conn.execute(
+        """SELECT COUNT(*) FROM applications
+           WHERE follow_up_date!='' AND follow_up_date<=?
+           AND status NOT IN ('Offer Received','Rejected','Withdrawn')""",
+        (today,)
+    ).fetchone()[0]
+    conn.close()
+    total_apps = sum(app_summary.values())
+    return {
+        "total_apps": total_apps,
+        "recruiter_response": app_summary.get("Recruiter Response", 0),
+        "interviews": app_summary.get("Interview Scheduled", 0) + app_summary.get("Interview Done", 0),
+        "offers": app_summary.get("Offer Received", 0),
+        "rejected": app_summary.get("Rejected", 0),
+        "followups_due": followups,
+        "total_resources": total_res,
+        "done_resources": done_res,
+        "total_portfolio": total_port,
+        "done_portfolio": done_port,
+        "tasks_today": tasks_today,
+        "done_today": done_today,
+        "pct_today": round((done_today / tasks_today) * 100) if tasks_today else 0,
+    }

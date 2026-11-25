@@ -1,0 +1,1255 @@
+"""
+app.py — JARVIS Career Command Centre
+---------------------------------------
+Entry point for the Streamlit application.
+Run this file with:  streamlit run app.py
+
+Pages:
+  🏠 Mission Control  — Dashboard overview, today's objective, and all metrics
+  📆 Daily Planner    — Timetable, task checklist, briefing, and review
+  📋 Applications     — Log and track job applications
+  📅 Daily Log        — Check in with today's execution metrics
+  🎯 Skills Tracker   — Milestone checklist for technical growth
+  📚 Resources        — Learning & Resource Centre
+  🗂 Portfolio        — Career evidence and portfolio tracker
+  💾 Export / Backup  — Download your data as CSV
+
+All data is stored locally in data/jarvis.db (SQLite).
+No internet connection or account is required.
+"""
+
+import streamlit as st
+import pandas as pd
+from datetime import date, datetime, timedelta
+from collections import OrderedDict
+import database as db
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE CONFIG  (must be the FIRST Streamlit call)
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="JARVIS — Career Command Centre",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GLOBAL STYLES  (JARVIS dark theme — command-centre aesthetic)
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ---- Base ---- */
+html, body, [data-testid="stAppViewContainer"] {
+    background-color: #0a0e1a;
+    color: #c8d6e5;
+    font-family: 'Segoe UI', sans-serif;
+}
+[data-testid="stSidebar"] {
+    background-color: #0d1225;
+    border-right: 1px solid #1e2d4a;
+}
+
+/* ---- Metric cards ---- */
+[data-testid="stMetric"] {
+    background-color: #111827;
+    border: 1px solid #1e3a5f;
+    border-radius: 8px;
+    padding: 16px 20px;
+}
+[data-testid="stMetricLabel"]  { color: #7a9abf; font-size: 0.78rem; letter-spacing: 0.08em; text-transform: uppercase; }
+[data-testid="stMetricValue"]  { color: #00d4ff; font-size: 2rem; font-weight: 700; }
+[data-testid="stMetricDelta"]  { font-size: 0.8rem; }
+
+/* ---- Section headers ---- */
+h1 { color: #00d4ff; letter-spacing: 0.04em; }
+h2 { color: #7ecfff; border-bottom: 1px solid #1e3a5f; padding-bottom: 6px; }
+h3 { color: #a0c4e8; }
+
+/* ---- Sidebar nav text ---- */
+[data-testid="stSidebar"] .stRadio label { font-size: 0.95rem; color: #a0c4e8; }
+
+/* ---- Buttons ---- */
+.stButton > button {
+    background-color: #0a2540;
+    color: #00d4ff;
+    border: 1px solid #00d4ff;
+    border-radius: 6px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    transition: background 0.2s;
+}
+.stButton > button:hover {
+    background-color: #00d4ff;
+    color: #0a0e1a;
+}
+
+/* ---- Dataframe ---- */
+[data-testid="stDataFrame"] { border: 1px solid #1e3a5f; border-radius: 6px; }
+
+/* ---- Forms ---- */
+[data-testid="stForm"] {
+    background-color: #111827;
+    border: 1px solid #1e3a5f;
+    border-radius: 8px;
+    padding: 20px;
+}
+
+/* ---- Divider ---- */
+hr { border-color: #1e3a5f; }
+
+/* ---- Alert boxes ---- */
+.jarvis-alert {
+    background: #0d2137;
+    border-left: 3px solid #f59e0b;
+    padding: 10px 16px;
+    border-radius: 4px;
+    margin: 8px 0;
+    font-size: 0.9rem;
+    color: #fcd34d;
+}
+.jarvis-info {
+    background: #0a2540;
+    border-left: 3px solid #00d4ff;
+    padding: 10px 16px;
+    border-radius: 4px;
+    margin: 8px 0;
+    font-size: 0.9rem;
+    color: #a0d4f5;
+}
+
+/* ---- Resource & Portfolio cards ---- */
+.res-card, .port-card {
+    background: #111827;
+    border: 1px solid #1e3a5f;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 8px 0;
+}
+.res-card h4 { color: #7ecfff; margin: 0 0 4px 0; }
+.res-card .meta { color: #4a7098; font-size: 0.8rem; margin-bottom: 8px; }
+.res-card .obj { color: #c8d6e5; font-size: 0.9rem; }
+
+/* ---- Tag badges ---- */
+.tag {
+    display: inline-block;
+    background: #0a2540;
+    color: #7ecfff;
+    font-size: 0.72rem;
+    padding: 2px 8px;
+    border-radius: 3px;
+    border: 1px solid #1e3a5f;
+    margin-right: 4px;
+}
+.tag-green { border-color: #22c55e; color: #22c55e; }
+.tag-amber { border-color: #f59e0b; color: #f59e0b; }
+.tag-red   { border-color: #ef4444; color: #ef4444; }
+
+/* ---- Objective card ---- */
+.obj-card {
+    background: linear-gradient(135deg, #0a1830 0%, #0d1f3c 100%);
+    border: 1px solid #1e3a5f;
+    border-left: 4px solid #00d4ff;
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 8px 0 16px 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BOOT — initialise DB and derive mission state
+# ─────────────────────────────────────────────────────────────────────────────
+db.initialize_database()
+TODAY = date.today().isoformat()
+MISSION_DAYS = 50
+
+
+def compute_mission_day(start_date_str: str) -> int:
+    """Return how many days into the mission we are (1-indexed)."""
+    start = date.fromisoformat(start_date_str)
+    delta = date.today() - start
+    return max(1, delta.days + 1)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR — navigation + mission banner
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("## ⚡ JARVIS")
+    st.markdown("<small style='color:#4a7098'>Career Command Centre · V1</small>", unsafe_allow_html=True)
+    st.divider()
+
+    config = db.get_mission_config()
+    if config:
+        mission_day = compute_mission_day(config["start_date"])
+        days_left = max(0, MISSION_DAYS - mission_day + 1)
+        progress = min(1.0, (mission_day - 1) / MISSION_DAYS)
+        st.markdown(f"**Agent:** {config['your_name']}")
+        st.markdown(f"**Day {mission_day}** of {MISSION_DAYS} · {days_left} days left")
+        st.progress(progress)
+        target_date = (date.fromisoformat(config["start_date"]) + timedelta(days=MISSION_DAYS - 1)).isoformat()
+        st.markdown(f"<small style='color:#4a7098'>Target: {target_date}</small>", unsafe_allow_html=True)
+    else:
+        st.markdown("<small style='color:#f59e0b'>⚠ Mission not configured yet.</small>", unsafe_allow_html=True)
+
+    st.divider()
+    page = st.radio(
+        "Navigate",
+        [
+            "🏠 Mission Control",
+            "📆 Daily Planner",
+            "📋 Applications",
+            "📅 Daily Log",
+            "🎯 Skills Tracker",
+            "📚 Resources",
+            "🗂 Portfolio",
+            "💾 Export / Backup",
+        ],
+        label_visibility="collapsed"
+    )
+    st.divider()
+    streak = db.get_streak()
+    st.markdown(f"🔥 **Streak:** {streak} day{'s' if streak != 1 else ''}")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 1 — MISSION CONTROL (Dashboard)
+# ─────────────────────────────────────────────────────────────────────────────
+if page == "🏠 Mission Control":
+    st.title("⚡ Mission Control")
+    st.markdown(f"<small style='color:#4a7098'>{datetime.now().strftime('%A, %d %B %Y  ·  %H:%M')}</small>", unsafe_allow_html=True)
+    st.divider()
+
+    # --- First-time mission setup ---
+    if not config:
+        st.markdown('<div class="jarvis-alert">⚠ Configure your mission to begin tracking.</div>', unsafe_allow_html=True)
+        with st.form("mission_setup"):
+            st.markdown("### 🚀 Mission Setup")
+            col1, col2 = st.columns(2)
+            with col1:
+                name_input = st.text_input("Your Name / Callsign", placeholder="e.g., Suhas")
+            with col2:
+                start_input = st.date_input("Mission Start Date", value=date.today())
+            submitted = st.form_submit_button("INITIALISE MISSION", use_container_width=True)
+            if submitted:
+                if name_input.strip():
+                    db.set_mission_config(start_input.isoformat(), name_input.strip())
+                    st.success("✅ Mission initialised! Welcome, Agent.")
+                    st.rerun()
+                else:
+                    st.error("Please enter your name.")
+        st.stop()
+
+    # --- Today's Objective Card ---
+    tasks_today = db.get_tasks_for_day(mission_day)
+    mission_card = db.get_mission_day(min(mission_day, MISSION_DAYS))
+    mission_start = date.fromisoformat(config["start_date"])
+    today_cal_date = (mission_start + timedelta(days=mission_day - 1)).isoformat()
+
+    if mission_card:
+        st.markdown(f"""
+        <div class="obj-card">
+          <div style="color:#4a7098;font-size:0.78rem;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:8px">
+            {mission_card['phase']} · Day {mission_day} of {MISSION_DAYS} ({today_cal_date}) · Status: {mission_card['status']}
+          </div>
+          <div style="color:#00d4ff;font-size:1.15rem;font-weight:700;margin-bottom:6px">
+            {mission_card['mission_title']}
+          </div>
+          <div style="color:#a0c4e8;font-size:0.9rem;margin-bottom:6px"><b>Target:</b> {mission_card['learning_target']}</div>
+          <div style="color:#7ecfff;font-size:0.85rem"><b>Deliverable:</b> {mission_card['deliverable']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # --- Dashboard Aggregate Metrics ---
+    dash = db.get_dashboard_summary(TODAY, mission_day)
+    mp   = db.get_mission_wide_progress()
+    total_apps = dash["total_apps"]
+    follow_ups = dash["followups_due"]
+
+    st.markdown("### 📊 Employment Outcomes")
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("Applications", total_apps)
+    c2.metric("Responses", dash["recruiter_response"])
+    c3.metric("Interviews", dash["interviews"])
+    c4.metric("Follow-Ups Due", follow_ups, delta="⚠ action" if follow_ups > 0 else None, delta_color="inverse")
+    c5.metric("Offers", dash["offers"])
+    c6.metric("Streak", f"{streak}d")
+
+    st.divider()
+
+    # --- Mission Progress Metrics (real completion, never time-based) ---
+    st.markdown("### 📈 Mission Progress (Verified Execution)")
+    p1, p2, p3, p4, p5 = st.columns(5)
+    p1.metric("Today's Tasks", f"{dash['done_today']}/{dash['tasks_today']}", delta=f"{dash['pct_today']}%")
+    p2.metric("Mission Tasks", f"{mp['completed_tasks']}/{mp['total_tasks']}", delta=f"{mp['tasks_pct']}%")
+    p3.metric("Days Completed", f"{mp['completed_days']}/{mp['total_days']}", delta=f"{mp['days_pct']}%")
+    p4.metric("Resources / Portfolio", f"{dash['done_resources']}/{dash['total_resources']} · {dash['done_portfolio']}/{dash['total_portfolio']}")
+    p5.metric("Days Remaining", max(0, MISSION_DAYS - mission_day + 1))
+
+    st.divider()
+
+    # --- Follow-up alerts ---
+    if follow_ups > 0:
+        st.markdown("### ⚠ Follow-Ups Due Today")
+        due = db.get_follow_ups_due(TODAY)
+        for app in due:
+            st.markdown(
+                f'<div class="jarvis-alert">📬 <b>{app["company"]}</b> — {app["role_title"]} '
+                f'| Status: {app["status"]} | Due: {app["follow_up_date"]}</div>',
+                unsafe_allow_html=True
+            )
+        st.divider()
+
+    # --- Morning Briefing / Evening Review ---
+    current_hour = datetime.now().hour
+    if current_hour < 14:
+        st.markdown("### ☀ Morning Briefing")
+        if tasks_today:
+            for i, t in enumerate(tasks_today[:3], 1):
+                st.markdown(
+                    f"**{i}.** {t['task_title']} — <small style='color:#4a7098'>{t['task_detail'][:90]}</small>",
+                    unsafe_allow_html=True
+                )
+        all_res = db.get_all_resources()
+        next_res = next((r for r in all_res if not r["done"]), None)
+        if next_res:
+            st.markdown(f"**📚 Recommended resource:** [{next_res['resource_title']}]({next_res['url']}) — {next_res['provider']}")
+        st.divider()
+    elif current_hour >= 17:
+        st.markdown("### 🌙 Evening Review")
+        completions = db.get_completion_for_day(mission_day, today_cal_date)
+        completed = [t for t in tasks_today if completions.get(t["id"], 0)]
+        incomplete = [t for t in tasks_today if not completions.get(t["id"], 0)]
+
+        ev1, ev2 = st.columns(2)
+        with ev1:
+            st.markdown("**✅ Completed today**")
+            for t in completed:
+                st.markdown(f"- ~~{t['task_title']}~~")
+            if not completed:
+                st.markdown("<small style='color:#4a7098'>No tasks marked complete yet</small>", unsafe_allow_html=True)
+        with ev2:
+            st.markdown("**⬜ Incomplete**")
+            for t in incomplete:
+                st.markdown(f"- {t['task_title']}")
+            if not incomplete:
+                st.markdown("<small style='color:#22c55e'>All done! 🎉</small>", unsafe_allow_html=True)
+        st.divider()
+
+    # --- Today's log summary ---
+    today_log = db.get_today_log(TODAY)
+    st.markdown("### 📅 Today's Execution")
+    if today_log:
+        tc1, tc2, tc3 = st.columns(3)
+        tc1.metric("Focus Hours", today_log["focus_hours"])
+        tc2.metric("Apps Submitted", today_log["apps_submitted"])
+        tc3.metric("Labs Completed", today_log["labs_completed"])
+        if today_log["notes"]:
+            st.markdown(f'<div class="jarvis-info">📝 {today_log["notes"]}</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="jarvis-alert">📅 No log entry for today yet. Head to Daily Log to check in.</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # --- Application Pipeline Breakdown ---
+    st.markdown("### 🏭 Application Pipeline")
+    if total_apps == 0:
+        st.markdown('<div class="jarvis-info">No applications logged yet. Add your first one in the Applications tab.</div>', unsafe_allow_html=True)
+    else:
+        all_apps = db.get_all_applications()
+        df = pd.DataFrame(all_apps)
+        # Pipeline status bar counts
+        status_counts = df["status"].value_counts().reset_index()
+        status_counts.columns = ["Status", "Count"]
+        st.dataframe(status_counts, use_container_width=True, hide_index=True)
+
+        st.markdown("#### By Role Category")
+        cat_counts = df["role_category"].value_counts().reset_index()
+        cat_counts.columns = ["Category", "Applications"]
+        st.dataframe(cat_counts, use_container_width=True, hide_index=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 2 — DAILY PLANNER
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📆 Daily Planner":
+    st.title("📆 Daily Mission Planner")
+
+    if not config:
+        st.markdown('<div class="jarvis-alert">⚠ Configure your mission first in Mission Control.</div>', unsafe_allow_html=True)
+        st.stop()
+
+    mission_day = compute_mission_day(config["start_date"])
+    is_prep_phase = mission_day <= 9
+
+    # ── Day selector ──
+    col_sel1, col_sel2 = st.columns([3, 1])
+    with col_sel1:
+        selected_day = st.slider(
+            "Mission Day",
+            min_value=1, max_value=50,
+            value=min(mission_day, 50),
+            help="Scroll to any day to view or edit its plan."
+        )
+    with col_sel2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        jump_today = st.button("⚡ Jump to Today", use_container_width=True)
+        if jump_today:
+            selected_day = min(mission_day, 50)
+
+    # Determine the calendar date that corresponds to this mission day
+    mission_start = date.fromisoformat(config["start_date"])
+    day_calendar_date = (mission_start + timedelta(days=selected_day - 1)).isoformat()
+    is_today = (selected_day == mission_day)
+
+    # Phase badge
+    if selected_day <= 9:
+        phase_label = "🔵 PREPARATION PHASE · Days 1–9"
+        phase_color = "#0a2540"
+        phase_border = "#00d4ff"
+    elif selected_day == 10:
+        phase_label = "🚀 LAUNCH DAY · Active Job Search Begins"
+        phase_color = "#0d2b00"
+        phase_border = "#22c55e"
+    else:
+        phase_label = "🟢 ACTIVE JOB SEARCH PHASE · Days 10–50"
+        phase_color = "#0d2b00"
+        phase_border = "#22c55e"
+
+    st.markdown(
+        f'<div style="background:{phase_color};border-left:3px solid {phase_border};'
+        f'padding:10px 16px;border-radius:4px;margin:4px 0 12px 0;color:#e2e8f0;">'
+        f'<b>Day {selected_day} of 50</b> &nbsp;·&nbsp; {phase_label} &nbsp;·&nbsp; {day_calendar_date}</div>',
+        unsafe_allow_html=True
+    )
+
+    st.divider()
+
+    # ── Load mission card, tasks & completions ──
+    mission_card = db.get_mission_day(selected_day)
+    tasks = db.get_tasks_for_day(selected_day)
+    completions = db.get_completion_for_day(selected_day, day_calendar_date)
+    total_tasks = len(tasks)
+    done_count  = sum(1 for t in tasks if completions.get(t["id"], 0) == 1)
+    pct         = round((done_count / total_tasks) * 100) if total_tasks else 0
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # COMPLETE 19-FIELD MISSION CARD
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if mission_card:
+        st.markdown(f"### 🎯 {mission_card['mission_title']}")
+        mc_status = mission_card.get("status", "Not Started")
+        st.markdown(
+            f'<div class="obj-card">'
+            f'<div style="color:#4a7098;font-size:0.78rem;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px">'
+            f'Day {selected_day} · {day_calendar_date} · {mission_card["phase"]} · Status: <b>{mc_status}</b></div>'
+            f'<div style="margin-bottom:6px"><b>Career Relevance:</b> {mission_card["career_relevance"]}</div>'
+            f'<div style="margin-bottom:6px"><b>Learning Target:</b> {mission_card["learning_target"]}</div>'
+            f'<div style="margin-bottom:6px"><b>⏱ Time Allocation (4h):</b> {mission_card["time_allocation"]}</div>'
+            f'<div style="margin-bottom:6px"><b>🛠 Required Tools:</b> {mission_card["required_tools"]}</div>'
+            f'<div style="margin-bottom:6px"><b>📦 Deliverable / Evidence:</b> {mission_card["deliverable"]}</div>'
+            f'<div style="margin-bottom:6px"><b>✅ Completion Criteria:</b> {mission_card["completion_criteria"]}</div>'
+            f'<div><b>📄 Resume / Portfolio Relevance:</b> {mission_card["resume_relevance"]}</div>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+
+        with st.expander("📖 Method, Resources, Checkpoints, Common Mistakes & Interview Question", expanded=False):
+            m1, m2 = st.columns(2)
+            with m1:
+                st.markdown("**🪜 Step-by-Step Method**")
+                st.text(mission_card["step_by_step_method"])
+                st.markdown("**🔗 Resources (Direct URLs)**")
+                for line in mission_card["resources_text"].splitlines():
+                    url = line.strip()
+                    if url:
+                        st.markdown(f"- [{url}]({url})")
+            with m2:
+                st.markdown("**❓ Checkpoint Questions**")
+                st.text(mission_card["checkpoint_questions"])
+                st.markdown("**⚠ Common Mistakes**")
+                st.markdown(f"<small style='color:#fcd34d'>{mission_card['common_mistakes']}</small>", unsafe_allow_html=True)
+                st.markdown("**🎤 Interview Question of the Day**")
+                st.markdown(f"<div class='jarvis-info'>{mission_card['interview_question']}</div>", unsafe_allow_html=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # MORNING BRIEFING (shown when viewing today's plan)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if is_today:
+        current_hour = datetime.now().hour
+        if current_hour < 14:  # Show briefing in the morning/midday
+            st.markdown("### ☀ Morning Briefing")
+            remaining = total_tasks - done_count
+            st.markdown(
+                f'<div class="jarvis-info">'
+                f'Good morning, <b>{config["your_name"]}</b>. '
+                f'Today is <b>Day {selected_day}</b> of your 50-day mission. '
+                f'You have <b>{remaining} task{"s" if remaining != 1 else ""}</b> on today\'s plan. '
+                f'{"⚠ You are still in the preparation phase — build strong foundations." if is_prep_phase else "🚀 Active job search mode — apply, follow up, and keep learning."}'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+            if selected_day == 9:
+                st.markdown(
+                    '<div class="jarvis-alert">'
+                    '⚠ <b>Day 9 Milestone:</b> Tomorrow is Launch Day. Before you finish today, confirm: '
+                    'resume polished ✓ · LinkedIn updated ✓ · cover letter templates drafted ✓ · recruiter list ready ✓'
+                    '</div>',
+                    unsafe_allow_html=True
+                )
+            st.divider()
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # COMPLETION PROGRESS BAR
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    col_p1, col_p2 = st.columns([4, 1])
+    with col_p1:
+        st.markdown(f"**Day {selected_day} Progress**")
+        st.progress(pct / 100)
+    with col_p2:
+        st.markdown(f"<br><b style='color:#00d4ff;font-size:1.4rem'>{pct}%</b>", unsafe_allow_html=True)
+    st.markdown(f"<small style='color:#4a7098'>{done_count} of {total_tasks} tasks completed</small>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # TASK TIMETABLE — grouped by time block
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.markdown("### 🗓 Today's Timetable")
+
+    if not tasks:
+        st.markdown('<div class="jarvis-info">No tasks planned for this day yet. Add one below.</div>', unsafe_allow_html=True)
+    else:
+        # Group tasks by time_block preserving sort order
+        blocks: OrderedDict = OrderedDict()
+        for t in tasks:
+            blocks.setdefault(t["time_block"], []).append(t)
+
+        for block_label, block_tasks in blocks.items():
+            # Colour-code the Break block differently
+            is_break = "Break" in block_label
+            block_color = "#0d1a2a" if not is_break else "#0a1020"
+            border_color = "#1e3a5f" if not is_break else "#1e2d4a"
+
+            st.markdown(
+                f'<div style="background:{block_color};border-left:3px solid {border_color};'
+                f'padding:8px 14px;border-radius:4px;margin:6px 0 4px 0;">'
+                f'<small style="color:#4a7098;letter-spacing:0.08em;text-transform:uppercase;">'
+                f'⏱ {block_label}</small></div>',
+                unsafe_allow_html=True
+            )
+
+            for task in block_tasks:
+                task_id  = task["id"]
+                is_done  = bool(completions.get(task_id, 0))
+                est_min  = task.get("est_minutes") or 45
+                res_url  = task.get("resource_url") or ""
+                exp_out  = task.get("expected_output") or ""
+
+                t_col1, t_col2 = st.columns([0.07, 0.93])
+                with t_col1:
+                    checked = st.checkbox("", value=is_done, key=f"task_chk_{task_id}_{day_calendar_date}",
+                                          label_visibility="collapsed")
+                    if checked != is_done:
+                        db.set_task_completion(task_id, day_calendar_date, checked)
+                        if checked:
+                            db.auto_start_mission_day(selected_day)
+                        st.rerun()
+                with t_col2:
+                    title_style = "text-decoration:line-through;color:#4a7098;" if is_done else "color:#c8d6e5;"
+                    cat_color   = "#0a2540"
+                    res_link_html = (
+                        f' &nbsp;·&nbsp; <a href="{res_url}" target="_blank" style="color:#00d4ff;font-size:0.78rem;">🔗 Resource</a>'
+                        if res_url else ""
+                    )
+                    exp_out_html = (
+                        f'<br><small style="color:#7ecfff;"><b>Expected output:</b> {exp_out}</small>'
+                        if exp_out else ""
+                    )
+                    st.markdown(
+                        f'<div style="padding:4px 0;">'
+                        f'<span style="{title_style}font-weight:600;">{task["task_title"]}</span>'
+                        f'&nbsp;&nbsp;<span style="background:{cat_color};color:#7ecfff;'
+                        f'font-size:0.72rem;padding:2px 7px;border-radius:3px;'
+                        f'border:1px solid #1e3a5f;">{task["category"]} · {est_min}m</span>'
+                        f'{res_link_html}<br>'
+                        f'<small style="color:#4a7098;">{task["task_detail"]}</small>'
+                        f'{exp_out_html}'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # DAY STATUS, NOTES & BLOCKER (persisted in mission_days)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if mission_card:
+        st.divider()
+        st.markdown("### 📝 Day Status, Notes & Blocker")
+        with st.form(f"mission_day_state_{selected_day}"):
+            ms_col1, ms_col2 = st.columns([1, 2])
+            with ms_col1:
+                cur_status = mission_card.get("status", "Not Started")
+                new_day_status = st.selectbox(
+                    "Mission Day Status",
+                    db.MISSION_DAY_STATUSES,
+                    index=db.MISSION_DAY_STATUSES.index(cur_status)
+                    if cur_status in db.MISSION_DAY_STATUSES else 0,
+                    help="A day is Completed only when its tasks and deliverables are finished or reviewed by you."
+                )
+            with ms_col2:
+                new_blocker = st.text_input(
+                    "Blocker & Next Action",
+                    value=mission_card.get("blocker_next_action", ""),
+                    placeholder="e.g., Wazuh RAM too high -> switched to Splunk Free / EVTX samples"
+                )
+            new_day_notes = st.text_area(
+                "Personal Notes",
+                value=mission_card.get("personal_notes", ""),
+                placeholder="Key takeaways, commands practised, or deliverable file paths..."
+            )
+            if st.form_submit_button("SAVE DAY STATUS & NOTES", use_container_width=True):
+                if new_day_status == "Completed" and pct < 100:
+                    st.warning("⚠ Not all tasks are checked yet — saved as Completed per your explicit review.")
+                db.update_mission_day_state(selected_day, new_day_status, new_day_notes, new_blocker)
+                st.success("✅ Day status and notes saved to SQLite.")
+                st.rerun()
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # EVENING REVIEW (shown when viewing today's plan in the evening)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if is_today and datetime.now().hour >= 17:
+        st.divider()
+        st.markdown("### 🌙 Evening Review")
+        completed_tasks   = [t for t in tasks if completions.get(t["id"], 0) == 1]
+        uncompleted_tasks = [t for t in tasks if not completions.get(t["id"], 0)]
+
+        ev_col1, ev_col2 = st.columns(2)
+        with ev_col1:
+            st.markdown("**✅ Completed**")
+            if completed_tasks:
+                for t in completed_tasks:
+                    st.markdown(f"- ~~{t['task_title']}~~")
+            else:
+                st.markdown("<small style='color:#4a7098'>None yet</small>", unsafe_allow_html=True)
+        with ev_col2:
+            st.markdown("**⬜ Unfinished**")
+            if uncompleted_tasks:
+                for t in uncompleted_tasks:
+                    st.markdown(f"- {t['task_title']}")
+            else:
+                st.markdown("<small style='color:#22c55e'>All tasks complete! 🎉</small>", unsafe_allow_html=True)
+
+        if pct == 100:
+            st.markdown('<div class="jarvis-info">🎉 Perfect day, Agent. All tasks complete. Log your hours in Daily Log.</div>', unsafe_allow_html=True)
+        elif pct >= 60:
+            st.markdown('<div class="jarvis-info">💪 Solid execution today. Carry forward any unfinished items tomorrow.</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="jarvis-alert">⚠ Less than 60% complete. Identify your top blocker and address it tomorrow.</div>', unsafe_allow_html=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # EDIT / ADD TASKS  (collapsed by default to keep UI clean)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    with st.expander("✏ Edit / Add Tasks for Day " + str(selected_day)):
+
+        # Edit existing task
+        if tasks:
+            st.markdown("**Edit an existing task**")
+            task_options = {t["id"]: f"[{t['time_block'][:7].strip()}] {t['task_title']}" for t in tasks}
+            edit_id = st.selectbox("Select task to edit", list(task_options.keys()),
+                                   format_func=lambda x: task_options[x], key="edit_task_sel")
+            edit_task = next(t for t in tasks if t["id"] == edit_id)
+
+            with st.form("edit_task_form"):
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    new_title = st.text_input("Task Title", value=edit_task["task_title"])
+                    new_block = st.selectbox("Time Block", db.TIME_BLOCKS,
+                                             index=db.TIME_BLOCKS.index(edit_task["time_block"])
+                                             if edit_task["time_block"] in db.TIME_BLOCKS else 0)
+                with ec2:
+                    new_cat   = st.selectbox("Category", db.TASK_CATEGORIES,
+                                             index=db.TASK_CATEGORIES.index(edit_task["category"])
+                                             if edit_task["category"] in db.TASK_CATEGORIES else 0)
+                new_detail = st.text_area("Task Detail", value=edit_task["task_detail"])
+                ef1, ef2 = st.columns(2)
+                with ef1:
+                    save_btn = st.form_submit_button("SAVE CHANGES", use_container_width=True)
+                with ef2:
+                    del_btn  = st.form_submit_button("DELETE TASK",  use_container_width=True)
+
+                if save_btn:
+                    db.update_planner_task(edit_id, new_title, new_detail, new_block, new_cat)
+                    st.success("✅ Task updated.")
+                    st.rerun()
+                if del_btn:
+                    db.delete_planner_task(edit_id)
+                    st.warning("🗑 Task deleted.")
+                    st.rerun()
+
+        st.divider()
+        # Add a new task
+        st.markdown("**Add a new task to Day " + str(selected_day) + "**")
+        with st.form("add_task_form"):
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                add_title = st.text_input("Task Title", placeholder="e.g., Review Nmap cheat sheet")
+                add_block = st.selectbox("Time Block", db.TIME_BLOCKS, key="add_block")
+            with ac2:
+                add_cat   = st.selectbox("Category", db.TASK_CATEGORIES, key="add_cat")
+            add_detail = st.text_area("Detail (optional)", placeholder="Describe what you'll do in this block")
+            if st.form_submit_button("ADD TASK", use_container_width=True):
+                if add_title.strip():
+                    db.add_planner_task(selected_day, add_block, add_title.strip(), add_detail.strip(), add_cat)
+                    st.success("✅ Task added.")
+                    st.rerun()
+                else:
+                    st.error("Task title is required.")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # MISSION HISTORY OVERVIEW  (completion % per day)
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    with st.expander("📊 Mission Planner History (all 50 days)"):
+        history = db.get_planner_history(1, 50)
+        if history:
+            df_hist = pd.DataFrame(history)
+            df_hist.columns = ["Day", "Total Tasks", "Completed", "% Done"]
+            st.dataframe(df_hist, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<div class="jarvis-info">No history yet.</div>', unsafe_allow_html=True)
+
+        st.divider()
+        st.markdown("**Reload Master 50-Day Career Roadmap**")
+        st.markdown(
+            "<small style='color:#f59e0b'>⚠ Warning: Reloading resets all planner tasks and clears planner completion checkboxes. "
+            "Your applications, daily logs, skills, resources, and portfolio items are untouched.</small>",
+            unsafe_allow_html=True
+        )
+        if st.button("🔄 Load Master 50-Day Roadmap", key="reseed_planner_btn"):
+            db.force_reseed_planner()
+            st.success("✅ Master 50-day career roadmap loaded.")
+            st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 3 — APPLICATIONS
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📋 Applications":
+    st.title("📋 Job Application Tracker")
+    st.divider()
+
+    # --- Add new application ---
+    with st.expander("➕ Log a New Application", expanded=False):
+        with st.form("add_application"):
+            col1, col2 = st.columns(2)
+            with col1:
+                company      = st.text_input("Company Name *", placeholder="e.g., Infosys")
+                role_title   = st.text_input("Role Title *", placeholder="e.g., SOC Analyst L1")
+                role_cat     = st.selectbox("Role Category *", db.ROLE_CATEGORIES)
+                location     = st.text_input("Location", placeholder="e.g., Bengaluru / Remote India")
+                job_url      = st.text_input("Job Posting URL", placeholder="https://...")
+            with col2:
+                applied_date   = st.date_input("Date Applied", value=date.today())
+                status         = st.selectbox("Current Status", db.APPLICATION_STATUSES)
+                follow_up      = st.date_input("Follow-Up Reminder Date (optional)", value=None)
+                salary_range   = st.text_input("Salary Range (optional)", placeholder="e.g., 4.5–6 LPA")
+                resume_version = st.text_input("Resume Version Used", placeholder="e.g., SOC Analyst v1 / IT Support v1")
+            keywords  = st.text_input("JD Keywords (comma-separated)", placeholder="e.g., SIEM, Wireshark, 4624, ITIL, TCP/IP")
+            app_notes = st.text_area("Notes (optional)", placeholder="Recruiter name, referral source, shift info...")
+            submitted = st.form_submit_button("LOG APPLICATION", use_container_width=True)
+            if submitted:
+                if company.strip() and role_title.strip():
+                    db.add_application(
+                        company.strip(), role_title.strip(), role_cat, job_url.strip(),
+                        applied_date.isoformat(), status,
+                        follow_up.isoformat() if follow_up else "",
+                        salary_range.strip(), app_notes.strip(),
+                        location.strip(), resume_version.strip(), keywords.strip()
+                    )
+                    st.success(f"✅ Application to {company.strip()} logged.")
+                    st.rerun()
+                else:
+                    st.error("Company Name and Role Title are required.")
+
+    st.divider()
+
+    # --- Filter bar ---
+    st.markdown("### Application Pipeline")
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        filter_status = st.selectbox("Filter by Status", ["All"] + db.APPLICATION_STATUSES)
+    with fc2:
+        filter_cat = st.selectbox("Filter by Category", ["All"] + db.ROLE_CATEGORIES)
+
+    apps = db.get_all_applications(
+        status_filter=filter_status if filter_status != "All" else None,
+        category_filter=filter_cat if filter_cat != "All" else None,
+    )
+
+    if not apps:
+        st.markdown('<div class="jarvis-info">No applications match the current filter.</div>', unsafe_allow_html=True)
+    else:
+        df = pd.DataFrame(apps)
+        display_cols = [c for c in ["id", "company", "role_title", "role_category", "location", "applied_date", "status", "resume_version", "follow_up_date", "salary_range"] if c in df.columns]
+        st.dataframe(df[display_cols], use_container_width=True, hide_index=True)
+
+        # --- Quick status update ---
+        st.divider()
+        st.markdown("### ✏ Update an Application")
+        app_ids = [a["id"] for a in apps]
+        app_labels = {a["id"]: f"#{a['id']} · {a['company']} — {a['role_title']}" for a in apps}
+        selected_id = st.selectbox("Select Application", app_ids, format_func=lambda x: app_labels[x])
+        selected_app = next(a for a in apps if a["id"] == selected_id)
+
+        with st.form("update_application"):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_status = st.selectbox("New Status", db.APPLICATION_STATUSES,
+                                          index=db.APPLICATION_STATUSES.index(selected_app["status"]))
+            with col2:
+                new_follow_up = st.text_input("Follow-Up Date (YYYY-MM-DD)", value=selected_app.get("follow_up_date", ""))
+            new_notes = st.text_area("Notes", value=selected_app.get("notes", ""))
+            u1, u2 = st.columns(2)
+            with u1:
+                update_btn = st.form_submit_button("UPDATE", use_container_width=True)
+            with u2:
+                delete_btn = st.form_submit_button("DELETE", use_container_width=True)
+
+            if update_btn:
+                db.update_application_status(selected_id, new_status, new_follow_up, new_notes)
+                st.success("✅ Application updated.")
+                st.rerun()
+            if delete_btn:
+                db.delete_application(selected_id)
+                st.warning("🗑 Application deleted.")
+                st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 4 — DAILY LOG
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📅 Daily Log":
+    st.title("📅 Daily Execution Log")
+    st.markdown('<div class="jarvis-info">Check in every day to build your streak and track mission consistency.</div>', unsafe_allow_html=True)
+    st.divider()
+
+    today_log = db.get_today_log(TODAY)
+    defaults = today_log or {}
+
+    with st.form("daily_checkin"):
+        st.markdown(f"### Check-in for {datetime.now().strftime('%A, %d %B %Y')}")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            focus_hours = st.number_input("Focus Hours Today", min_value=0.0, max_value=24.0,
+                                          value=float(defaults.get("focus_hours", 0)), step=0.5)
+        with col2:
+            apps_submitted = st.number_input("Applications Submitted", min_value=0, max_value=50,
+                                             value=int(defaults.get("apps_submitted", 0)))
+        with col3:
+            labs_completed = st.number_input("Labs / Study Sessions Completed", min_value=0, max_value=20,
+                                             value=int(defaults.get("labs_completed", 0)))
+        log_notes = st.text_area("Daily Notes (optional)",
+                                 value=defaults.get("notes", ""),
+                                 placeholder="What did you work on today? Any blockers? Wins?")
+        submitted = st.form_submit_button("SAVE CHECK-IN", use_container_width=True)
+        if submitted:
+            db.upsert_daily_log(TODAY, focus_hours, apps_submitted, labs_completed, log_notes)
+            st.success("✅ Daily log saved.")
+            st.rerun()
+
+    st.divider()
+
+    # --- Log history ---
+    st.markdown("### 📂 Log History")
+    logs = db.get_all_daily_logs()
+    if logs:
+        df = pd.DataFrame(logs)
+        st.dataframe(df[["log_date", "focus_hours", "apps_submitted", "labs_completed", "notes"]],
+                     use_container_width=True, hide_index=True)
+        # Summary totals
+        st.divider()
+        sc1, sc2, sc3 = st.columns(3)
+        sc1.metric("Total Focus Hours", round(df["focus_hours"].sum(), 1))
+        sc2.metric("Total Apps Logged", int(df["apps_submitted"].sum()))
+        sc3.metric("Total Lab Sessions", int(df["labs_completed"].sum()))
+    else:
+        st.markdown('<div class="jarvis-info">No log entries yet. Complete your first check-in above.</div>', unsafe_allow_html=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 5 — SKILLS TRACKER
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🎯 Skills Tracker":
+    st.title("🎯 Skills & Milestone Tracker")
+    st.markdown('<div class="jarvis-info">Track your technical growth across all role categories relevant to your mission.</div>', unsafe_allow_html=True)
+    st.divider()
+
+    milestones = db.get_all_milestones()
+    total = len(milestones)
+    done_count = sum(1 for m in milestones if m["done"])
+    pct = int((done_count / total) * 100) if total else 0
+
+    st.markdown(f"**Overall Progress: {done_count}/{total} milestones completed ({pct}%)**")
+    st.progress(done_count / total if total else 0)
+    st.divider()
+
+    # Group by category
+    categories = {}
+    for m in milestones:
+        categories.setdefault(m["category"], []).append(m)
+
+    for cat, items in categories.items():
+        cat_done = sum(1 for i in items if i["done"])
+        st.markdown(f"#### {cat}  `{cat_done}/{len(items)}`")
+        for item in items:
+            checked = st.checkbox(
+                item["milestone"],
+                value=bool(item["done"]),
+                key=f"ms_{item['id']}"
+            )
+            if checked != bool(item["done"]):
+                db.toggle_milestone(item["id"], checked)
+                st.rerun()
+        st.divider()
+
+    # --- Add custom milestone ---
+    with st.expander("➕ Add a Custom Milestone"):
+        with st.form("add_milestone"):
+            col1, col2 = st.columns(2)
+            with col1:
+                new_cat = st.text_input("Category", placeholder="e.g., Certifications")
+            with col2:
+                new_ms  = st.text_input("Milestone", placeholder="e.g., Pass CompTIA Security+")
+            if st.form_submit_button("ADD MILESTONE", use_container_width=True):
+                if new_cat.strip() and new_ms.strip():
+                    db.add_milestone(new_cat.strip(), new_ms.strip())
+                    st.success("✅ Milestone added.")
+                    st.rerun()
+                else:
+                    st.error("Both fields are required.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 6 — RESOURCES
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "📚 Resources":
+    st.title("📚 Learning Resource Centre")
+    st.markdown(
+        '<div class="jarvis-info">Curated learning resources for your 50-day technical employment mission. '
+        'Mark resources complete as you finish them. All links open in a new tab.</div>',
+        unsafe_allow_html=True
+    )
+    st.divider()
+
+    res_summary = db.get_resource_summary()
+    total_res = res_summary.get("total", 0)
+    done_res  = res_summary.get("done", 0)
+    pct_res   = round((done_res / total_res) * 100) if total_res else 0
+
+    rm1, rm2, rm3 = st.columns(3)
+    rm1.metric("Total Resources", total_res)
+    rm2.metric("Completed", done_res)
+    rm3.metric("Progress", f"{pct_res}%")
+    if total_res > 0:
+        st.progress(pct_res / 100)
+
+    st.divider()
+
+    filter_cat = st.selectbox("Filter by Category", ["All"] + db.RESOURCE_CATEGORIES, key="res_filter_cat")
+    resources = db.get_all_resources(category_filter=filter_cat if filter_cat != "All" else None)
+
+    if not resources:
+        st.markdown('<div class="jarvis-info">No resources found. Add one below.</div>', unsafe_allow_html=True)
+    else:
+        for res in resources:
+            is_done = bool(res["done"])
+            status_tag = '<span class="tag tag-green">✓ Complete</span>' if is_done else '<span class="tag">In Progress</span>'
+            note_lower = res["access_note"].lower()
+            is_paid_caveat = any(w in note_lower for w in ("subscription", "payment", "paid", "limited"))
+            access_color = "tag-amber" if is_paid_caveat else "tag-green"
+            access_prefix = "⚠ " if is_paid_caveat else ""
+
+            st.markdown(f"""
+            <div class="res-card">
+                <h4>{res['sequence_num']}. {res['resource_title']}</h4>
+                <div class="meta">
+                    {res['provider']} · {res['skill_category']} · ~{res['est_hours']}h
+                    &nbsp;{status_tag}&nbsp;
+                    <span class="tag {access_color}">{access_prefix}{res['access_note']}</span>
+                </div>
+                <div class="obj"><b>Objective:</b> {res['learning_obj']}</div>
+                {f'<div class="obj" style="margin-top:6px"><b>Exercise:</b> {res["practical_ex"]}</div>' if res.get('practical_ex') else ''}
+                {f'<div class="obj" style="margin-top:6px"><b>Expected output:</b> {res["expected_output"]}</div>' if res.get('expected_output') else ''}
+                {f'<div class="obj" style="margin-top:6px;color:#4a7098"><b>Notes:</b> {res["personal_notes"]}</div>' if res.get('personal_notes') else ''}
+                {f'<div style="margin-top:10px"><a href="{res["url"]}" target="_blank" style="color:#00d4ff;font-size:0.9rem;">🔗 Open Resource →</a></div>' if res.get('url') else ''}
+            </div>
+            """, unsafe_allow_html=True)
+
+            rc1, rc2, rc3 = st.columns([2, 1, 1])
+            with rc1:
+                checked = st.checkbox("Mark as complete", value=is_done, key=f"res_done_{res['id']}")
+                if checked != is_done:
+                    db.toggle_resource_done(res["id"], checked)
+                    st.rerun()
+            with rc2:
+                if st.button("✏ Edit", key=f"res_edit_btn_{res['id']}", use_container_width=True):
+                    st.session_state[f"edit_res_{res['id']}"] = True
+            with rc3:
+                if st.button("🗑 Delete", key=f"res_del_btn_{res['id']}", use_container_width=True):
+                    db.delete_resource(res["id"])
+                    st.rerun()
+
+            if st.session_state.get(f"edit_res_{res['id']}", False):
+                with st.form(f"edit_res_form_{res['id']}"):
+                    ea, eb = st.columns(2)
+                    with ea:
+                        e_title  = st.text_input("Title", value=res["resource_title"])
+                        e_prov   = st.text_input("Provider", value=res["provider"])
+                        e_url    = st.text_input("URL", value=res["url"])
+                        e_access = st.text_input("Access Note", value=res["access_note"])
+                        e_hours  = st.number_input("Est. Hours", value=float(res["est_hours"]), min_value=0.5, step=0.5)
+                    with eb:
+                        e_topic  = st.text_input("Topic", value=res["topic"])
+                        e_cat    = st.selectbox(
+                            "Category", db.RESOURCE_CATEGORIES,
+                            index=db.RESOURCE_CATEGORIES.index(res["skill_category"])
+                            if res["skill_category"] in db.RESOURCE_CATEGORIES else 0
+                        )
+                        e_seq    = st.number_input("Sequence", value=int(res["sequence_num"]), min_value=1, step=1)
+                    e_obj   = st.text_area("Learning Objective", value=res["learning_obj"])
+                    e_ex    = st.text_area("Practical Exercise", value=res["practical_ex"])
+                    e_out   = st.text_area("Expected Output", value=res["expected_output"])
+                    e_notes = st.text_area("Personal Notes", value=res["personal_notes"])
+
+                    sf1, sf2 = st.columns(2)
+                    with sf1:
+                        if st.form_submit_button("SAVE", use_container_width=True):
+                            db.update_resource(
+                                res["id"], topic=e_topic, skill_category=e_cat,
+                                resource_title=e_title, provider=e_prov, url=e_url,
+                                access_note=e_access, learning_obj=e_obj, sequence_num=int(e_seq),
+                                est_hours=float(e_hours), practical_ex=e_ex, expected_output=e_out,
+                                done=int(bool(res["done"])), personal_notes=e_notes
+                            )
+                            del st.session_state[f"edit_res_{res['id']}"]
+                            st.rerun()
+                    with sf2:
+                        if st.form_submit_button("CANCEL", use_container_width=True):
+                            del st.session_state[f"edit_res_{res['id']}"]
+                            st.rerun()
+
+            st.divider()
+
+    with st.expander("➕ Add a New Resource"):
+        with st.form("add_resource_form"):
+            na1, na2 = st.columns(2)
+            with na1:
+                n_title  = st.text_input("Resource Title *")
+                n_prov   = st.text_input("Provider *")
+                n_url    = st.text_input("URL", placeholder="https://...")
+                n_access = st.text_input("Access Note", value="Free")
+                n_hours  = st.number_input("Estimated Hours", min_value=0.5, value=2.0, step=0.5)
+            with na2:
+                n_topic = st.text_input("Topic *")
+                n_cat   = st.selectbox("Category", db.RESOURCE_CATEGORIES)
+                n_seq   = st.number_input("Sequence Number", min_value=1, value=len(resources) + 1, step=1)
+            n_obj = st.text_area("Learning Objective")
+            n_ex  = st.text_area("Practical Exercise")
+            n_out = st.text_area("Expected Output")
+            if st.form_submit_button("ADD RESOURCE", use_container_width=True):
+                if n_title.strip() and n_prov.strip() and n_topic.strip():
+                    db.add_resource(
+                        n_topic.strip(), n_cat, n_title.strip(), n_prov.strip(),
+                        n_url.strip(), n_access.strip(), n_obj.strip(),
+                        int(n_seq), float(n_hours), n_ex.strip(), n_out.strip()
+                    )
+                    st.success("✅ Resource added.")
+                    st.rerun()
+                else:
+                    st.error("Title, Provider, and Topic are required.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 7 — PORTFOLIO
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🗂 Portfolio":
+    st.title("🗂 Career Evidence & Portfolio")
+    st.markdown(
+        '<div class="jarvis-info">Track proof of work — not just learning hours. '
+        'Every item here is evidence you can reference in interviews and job applications.</div>',
+        unsafe_allow_html=True
+    )
+    st.divider()
+
+    port_summary = db.get_portfolio_summary()
+    ps1, ps2, ps3 = st.columns(3)
+    ps1.metric("Total Items", port_summary.get("total", 0))
+    ps2.metric("Complete", port_summary.get("completed", 0))
+    ps3.metric("Categories Covered", len(port_summary.get("categories_covered", [])))
+    st.divider()
+
+    with st.expander("➕ Add Portfolio Item", expanded=False):
+        with st.form("add_portfolio_form"):
+            pa1, pa2 = st.columns(2)
+            with pa1:
+                p_title  = st.text_input("Title *", placeholder="e.g., Network Scanner Script")
+                p_cat    = st.selectbox("Category *", db.PORTFOLIO_CATEGORIES)
+                p_url    = st.text_input("Evidence URL or Path", placeholder="https://github.com/... or data/notes/...")
+                p_status = st.selectbox("Status", db.PORTFOLIO_STATUSES)
+            with pa2:
+                p_skills = st.text_input("Skills Demonstrated", placeholder="e.g., Python, Networking, Nmap")
+                p_date   = st.date_input("Date Completed (optional)", value=None)
+            p_desc  = st.text_area("Description", placeholder="What is this? What problem does it solve? What did you learn?")
+            p_notes = st.text_area("Notes / Interview Explanation", placeholder="How would you explain this in an interview in 2 minutes?")
+            if st.form_submit_button("ADD ITEM", use_container_width=True):
+                if p_title.strip():
+                    db.add_portfolio_item(
+                        p_title.strip(), p_cat, p_desc.strip(), p_url.strip(),
+                        p_skills.strip(), p_status,
+                        p_date.isoformat() if p_date else "", p_notes.strip()
+                    )
+                    st.success("✅ Portfolio item added.")
+                    st.rerun()
+                else:
+                    st.error("Title is required.")
+
+    st.divider()
+
+    pf1, pf2 = st.columns(2)
+    with pf1:
+        filter_pcat = st.selectbox("Filter by Category", ["All"] + db.PORTFOLIO_CATEGORIES, key="port_filter_cat")
+    with pf2:
+        filter_pstatus = st.selectbox("Filter by Status", ["All"] + db.PORTFOLIO_STATUSES, key="port_filter_status")
+
+    items = db.get_all_portfolio_items(
+        category_filter=filter_pcat if filter_pcat != "All" else None,
+        status_filter=filter_pstatus if filter_pstatus != "All" else None,
+    )
+
+    if not items:
+        st.markdown('<div class="jarvis-info">No portfolio items yet. Add your first piece of evidence above.</div>', unsafe_allow_html=True)
+    else:
+        for item in items:
+            status_color = (
+                "tag-green" if item["status"] == "Complete"
+                else ("tag-amber" if item["status"] == "In Progress" else "tag-red")
+            )
+            st.markdown(f"""
+            <div class="port-card">
+                <h4 style="color:#7ecfff;margin:0 0 6px 0">{item['title']}</h4>
+                <span class="tag">{item['category']}</span>
+                <span class="tag {status_color}">{item['status']}</span>
+                {f'<span class="tag">{item["date_completed"]}</span>' if item.get("date_completed") else ''}
+                {f'<div style="color:#c8d6e5;margin-top:10px;font-size:0.9rem">{item["description"]}</div>' if item.get("description") else ''}
+                {f'<div style="color:#4a7098;margin-top:6px;font-size:0.85rem"><b>Skills:</b> {item["skills_shown"]}</div>' if item.get("skills_shown") else ''}
+                {f'<div style="margin-top:8px"><a href="{item["evidence_url"]}" target="_blank" style="color:#00d4ff;font-size:0.85rem">🔗 View Evidence →</a></div>' if item.get("evidence_url") else ''}
+                {f'<div style="color:#a0c4e8;margin-top:6px;font-size:0.85rem;font-style:italic">{item["personal_notes"]}</div>' if item.get("personal_notes") else ''}
+            </div>
+            """, unsafe_allow_html=True)
+
+            pc1, pc2, pc3 = st.columns([2, 1, 1])
+            with pc1:
+                new_pstatus = st.selectbox(
+                    "Status", db.PORTFOLIO_STATUSES,
+                    index=db.PORTFOLIO_STATUSES.index(item["status"])
+                    if item["status"] in db.PORTFOLIO_STATUSES else 0,
+                    key=f"port_status_{item['id']}"
+                )
+                if new_pstatus != item["status"]:
+                    db.update_portfolio_item(
+                        item["id"], item["title"], item["category"], item["description"],
+                        item["evidence_url"], item["skills_shown"], new_pstatus,
+                        item["date_completed"], item["personal_notes"]
+                    )
+                    st.rerun()
+            with pc2:
+                if st.button("✏ Edit", key=f"port_edit_{item['id']}", use_container_width=True):
+                    st.session_state[f"edit_port_{item['id']}"] = True
+            with pc3:
+                if st.button("🗑 Delete", key=f"port_del_{item['id']}", use_container_width=True):
+                    db.delete_portfolio_item(item["id"])
+                    st.rerun()
+
+            if st.session_state.get(f"edit_port_{item['id']}", False):
+                with st.form(f"edit_port_form_{item['id']}"):
+                    ep1, ep2 = st.columns(2)
+                    with ep1:
+                        ep_title  = st.text_input("Title", value=item["title"])
+                        ep_cat    = st.selectbox(
+                            "Category", db.PORTFOLIO_CATEGORIES,
+                            index=db.PORTFOLIO_CATEGORIES.index(item["category"])
+                            if item["category"] in db.PORTFOLIO_CATEGORIES else 0
+                        )
+                        ep_url    = st.text_input("Evidence URL", value=item["evidence_url"])
+                        ep_status = st.selectbox(
+                            "Status", db.PORTFOLIO_STATUSES,
+                            index=db.PORTFOLIO_STATUSES.index(item["status"])
+                            if item["status"] in db.PORTFOLIO_STATUSES else 0
+                        )
+                    with ep2:
+                        ep_skills = st.text_input("Skills Demonstrated", value=item["skills_shown"])
+                        ep_date   = st.text_input("Date Completed (YYYY-MM-DD)", value=item.get("date_completed", ""))
+                    ep_desc  = st.text_area("Description", value=item["description"])
+                    ep_notes = st.text_area("Notes", value=item["personal_notes"])
+                    ef1, ef2 = st.columns(2)
+                    with ef1:
+                        if st.form_submit_button("SAVE", use_container_width=True):
+                            db.update_portfolio_item(
+                                item["id"], ep_title, ep_cat, ep_desc,
+                                ep_url, ep_skills, ep_status, ep_date, ep_notes
+                            )
+                            del st.session_state[f"edit_port_{item['id']}"]
+                            st.rerun()
+                    with ef2:
+                        if st.form_submit_button("CANCEL", use_container_width=True):
+                            del st.session_state[f"edit_port_{item['id']}"]
+                            st.rerun()
+
+            st.divider()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PAGE 8 — EXPORT / BACKUP
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "💾 Export / Backup":
+    st.title("💾 Export & Backup")
+    st.markdown('<div class="jarvis-info">All your data is stored locally in <code>data/jarvis.db</code>. Export individual tables as CSV or back up the entire database file.</div>', unsafe_allow_html=True)
+    st.divider()
+
+    st.markdown("### Download Tables as CSV")
+    tables = {
+        "mission_days":        "50-Day Mission Cards",
+        "applications":        "Job Applications",
+        "daily_log":           "Daily Log",
+        "skill_milestones":    "Skill Milestones",
+        "planner_tasks":       "Planner Tasks",
+        "planner_completions": "Planner Completions",
+        "learning_resources":  "Learning Resources",
+        "portfolio_items":     "Portfolio Items",
+        "mission_config":      "Mission Config",
+    }
+
+    for table_key, table_label in tables.items():
+        csv_data = db.export_to_csv(table_key)
+        st.download_button(
+            label=f"⬇ Download {table_label} CSV",
+            data=csv_data or "No data yet.",
+            file_name=f"jarvis_{table_key}_{TODAY}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key=f"dl_{table_key}"
+        )
+
+    st.divider()
+    st.markdown("### Full Database Backup")
+    st.markdown("""
+    For a complete backup, copy the file below to a safe location (USB drive, Google Drive, etc.):
+
+    ```
+    data/jarvis.db
+    ```
+
+    This single file contains **all** your mission data. To restore, simply replace the file and restart JARVIS.
+    """)
+    st.markdown('<div class="jarvis-alert">⚠ Back up regularly. Data is stored only on this machine.</div>', unsafe_allow_html=True)
